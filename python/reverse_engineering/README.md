@@ -13,9 +13,9 @@ If you want to adapt this driver to another PicoScope model (2202, 2205,
 
 | Folder | Question it answered | Where the answer lives today |
 |---|---|---|
-| `pga/` | How does the programmable-gain amplifier map range → gain bytes? | `PGA_TABLE` in `driver/picoscope2204a.c`; `docs/protocol.md` §"PGA lookup" |
-| `raw_format/` | Is the ADC 8-bit or 16-bit? How is the buffer laid out? | 8-bit; `uint8 - 128` → signed; `docs/protocol.md` §"Hardware Facts" |
-| `dual_channel/` | How are CH A and CH B interleaved in the shared 16 KB buffer? | Tail-interleaved B,A,B,A with B at even offsets; `docs/protocol.md` §"Dual Channel" |
+| `pga/` | How does the programmable-gain amplifier map range → gain bytes? | `PGA_TABLE` in `driver/picoscope2204a.c`; `docs/protocol.md` §"PGA table" |
+| `raw_format/` | Is the ADC 8-bit or 16-bit? How is the buffer laid out? | 8-bit; `uint8 - 128` → signed; `docs/protocol.md` §"Device identity" |
+| `dual_channel/` | How are CH A and CH B interleaved in the shared 16 KB buffer? | Tail-interleaved B,A,B,A with B at even offsets; `docs/protocol.md` §"Dual-channel buffer layout" |
 | `native_streaming/` | Can we sustain gap-free streaming above ~100 S/s? | No — FPGA native mode is hardware-capped. Use `PS_STREAM_FAST` (block bursts) or `PS_STREAM_SDK` (1 MS/s via LUT) instead |
 | `fast_block/` | How fast can we cycle back-to-back block captures? | ~330 kS/s verified (16× faster than naive polling) |
 | `sdk_capture/` | Capture reference USB traces from the official SDK for byte-by-byte diff | Run under `LD_PRELOAD=./usb_interceptor.so` to produce `usb_trace.log` |
