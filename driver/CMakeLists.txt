@@ -4,7 +4,10 @@ project(picoscope2204a C)
 set(CMAKE_C_STANDARD 11)
 
 option(PS2204A_BUILD_TEST "Build test program" ON)
-option(PS2204A_BUILD_JNI "Build JNI wrapper for Android" OFF)
+
+# Android / JNI builds live in ../android-lib/ as a Gradle module. Its
+# CMakeLists.txt references this driver's .c/.h directly, so there is
+# no separate JNI option here anymore.
 
 # Find libusb
 find_package(PkgConfig)
@@ -52,17 +55,6 @@ target_compile_options(picoscope2204a_static PRIVATE -Wall -Wextra -O2)
 if(PS2204A_BUILD_TEST)
     add_executable(test_driver test_driver.c)
     target_link_libraries(test_driver picoscope2204a)
-endif()
-
-# JNI wrapper
-if(PS2204A_BUILD_JNI)
-    find_package(JNI REQUIRED)
-    add_library(picoscope_jni SHARED jni/picoscope_jni.c)
-    target_include_directories(picoscope_jni PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${JNI_INCLUDE_DIRS}
-    )
-    target_link_libraries(picoscope_jni picoscope2204a_static)
 endif()
 
 # Install

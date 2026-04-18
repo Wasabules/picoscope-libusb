@@ -20,8 +20,9 @@ through Wails but have not yet been validated against hardware.
 
 | Path | Description |
 |---|---|
-| `driver/` | C driver (`libpicoscope2204a.{so,a}`) + JNI bindings |
+| `driver/` | C driver (`libpicoscope2204a.{so,a}`) — the core, plain libusb |
 | `gui/` | Wails desktop GUI (Go + Svelte), cgo-linked to the driver |
+| `android-lib/` | Gradle module packaging the driver + JNI shim as an AAR (distributed via JitPack) |
 | `python/` | Reference Python driver (PyUSB) — useful for quick experiments |
 | `tools/firmware-extractor/` | Extract firmware from your own device |
 | `docs/` | Protocol reverse-engineering notes + how-to guides |

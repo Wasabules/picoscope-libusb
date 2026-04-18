@@ -102,3 +102,15 @@ CLAUDE.md
 .env.local
 *.local.json
 .emulator_console_auth_token
+
+# ============================================================================
+# Gradle / Android build artefacts
+# ============================================================================
+.gradle/
+/build/
+android-lib/build/
+android-lib/.cxx/
+android-lib/.externalNativeBuild/
+local.properties
+captures/
+*.iml

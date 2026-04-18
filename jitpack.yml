@@ -1,0 +1,15 @@
+# JitPack build configuration.
+#
+# We only want JitPack to build the Android library module — the Wails
+# GUI and the C driver don't make sense as JVM artifacts and would just
+# break the build (no Go / wails toolchain on JitPack runners).
+
+jdk:
+  - openjdk17
+
+before_install:
+  - sdk install java 17.0.10-tem || true
+  - sdk use java 17.0.10-tem || true
+
+install:
+  - gradle :android-lib:assembleRelease :android-lib:publishToMavenLocal -x lint -x test

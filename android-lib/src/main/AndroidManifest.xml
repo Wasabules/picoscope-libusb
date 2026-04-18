@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Consumers that link this library must declare the USB host
+        feature in their own AndroidManifest.xml. We leave it out of
+        the library manifest so apps that only want to pull in the
+        Java/JNI glue for unit tests aren't forced to require USB host.
+    -->
+
+</manifest>
