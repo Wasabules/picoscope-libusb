@@ -1,0 +1,104 @@
+# ============================================================================
+# Firmware — DO NOT COMMIT
+#
+# The FX2 / FPGA firmware and waveform LUTs are copyrighted by Pico Technology
+# Ltd. Reverse-engineering the protocol is legal in most jurisdictions, but
+# redistributing the firmware blobs is not. Each user must extract these from
+# their own device — see docs/firmware-extraction.md.
+# ============================================================================
+driver/picoscope2204a_fw.h
+driver/picoscope2204a_stream_lut.h
+driver/firmware/*.bin
+driver/firmware/*.txt
+!driver/firmware/.gitkeep
+**/fx2_firmware*.bin
+**/fx2_firmware*.txt
+**/fpga_firmware*.bin
+**/ps2000_firmware*.bin
+**/ep06_*.bin
+
+# ============================================================================
+# USB captures — may embed firmware / device serials
+# ============================================================================
+*.pcap
+*.pcapng
+usb_trace.log
+usb_strace.log
+sdk_strace.log
+trace_*.log
+
+# ============================================================================
+# Build artefacts
+# ============================================================================
+# Driver
+driver/*.o
+driver/*.so
+driver/*.a
+driver/build/
+tools/firmware-extractor/libps_intercept.so
+driver/test_driver
+driver/calibrate_ranges
+driver/calibrate_siggen
+driver/dump_eeprom
+driver/debug_capture
+driver/debug_tb0
+driver/validate_all
+driver/bench_*
+!driver/bench_*.c
+driver/test_ets
+driver/test_native_streaming
+driver/test_sdk_streaming
+
+# GUI
+gui/build/bin/
+gui/frontend/dist/
+gui/frontend/node_modules/
+gui/frontend/wailsjs/
+gui/gui
+gui/uart-diag
+gui/native-dump
+
+# Go
+*.test
+*.prof
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ============================================================================
+# Editor / IDE / OS
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Git backups from history-rewrite operations
+# ============================================================================
+.git.backup*
+.git.old*
+
+# ============================================================================
+# Local AI / assistant artefacts
+# ============================================================================
+.claude/
+.claude.json*
+.aider*
+.cursor/
+CLAUDE.md
+
+# ============================================================================
+# Local configuration
+# ============================================================================
+.env
+.env.local
+*.local.json
+.emulator_console_auth_token
