@@ -34,6 +34,7 @@ add_library(picoscope2204a_static STATIC
 
 target_include_directories(picoscope2204a_static PUBLIC
     ${PS_DRIVER_ROOT}
+    ${CMAKE_CURRENT_SOURCE_DIR}/shim
 )
 
 target_link_libraries(picoscope2204a_static PUBLIC

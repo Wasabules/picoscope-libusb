@@ -87,7 +87,7 @@ public final class PicoScope2204A {
     public static native float[] nativeGetLatest(long handle, int n);
 
     public static native int nativeSetSiggen(long handle, int waveType,
-                                             float freqHz);
+                                             float freqHz, int pkpkUv);
 
     /** @return device serial in the form {@code JOxxxxxxxx}, or empty string */
     public static native String nativeGetSerial(long handle);

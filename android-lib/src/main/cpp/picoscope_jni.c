@@ -129,11 +129,12 @@ JNI_FN(nativeGetLatest)(JNIEnv *env, jclass cls, jlong handle, jint n)
 
 JNIEXPORT jint JNICALL
 JNI_FN(nativeSetSiggen)(JNIEnv *env, jclass cls, jlong handle,
-                       jint wave_type, jfloat freq_hz)
+                       jint wave_type, jfloat freq_hz, jint pkpk_uv)
 {
     (void)env; (void)cls;
     ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
-    return (jint)ps2204a_set_siggen(dev, (ps_wave_t)wave_type, freq_hz);
+    return (jint)ps2204a_set_siggen(dev, (ps_wave_t)wave_type, freq_hz,
+                                    (uint32_t)pkpk_uv);
 }
 
 /* Info ------------------------------------------------------------------- */
