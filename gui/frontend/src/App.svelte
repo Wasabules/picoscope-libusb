@@ -1,10 +1,28 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import WaveformCanvas from './lib/WaveformCanvas.svelte';
-  import CalibrationModal from './lib/CalibrationModal.svelte';
-  import FirmwareSetupModal from './lib/FirmwareSetupModal.svelte';
-  import DecoderPanel from './lib/DecoderPanel.svelte';
-  import DecoderLog from './lib/DecoderLog.svelte';
+  import { fmtMv, fmtHz, fmtRate, fmtCount, fmtTime, fmtMeas } from './lib/utils/format.js';
+  import { RING_CAP, createRing, pushRing, materializeRing } from './lib/dsp/ring.js';
+  import { fftMag } from './lib/dsp/fft.js';
+  import { computeMath } from './lib/dsp/math.js';
+  import { computeMeas } from './lib/dsp/measurements.js';
+  import { makeEmptyStats, pushStat, aggregateStatsBag } from './lib/dsp/stats.js';
+  import WaveformCanvas from './lib/components/WaveformCanvas.svelte';
+  import DecoderPanel from './lib/components/DecoderPanel.svelte';
+  import DecoderLog from './lib/components/DecoderLog.svelte';
+  import ErrorToast from './lib/components/ErrorToast.svelte';
+  import StatusBar from './lib/components/StatusBar.svelte';
+  import MeasurementsBar from './lib/components/MeasurementsBar.svelte';
+  import ChannelPanel from './lib/components/ChannelPanel.svelte';
+  import TimebaseControls from './lib/components/TimebaseControls.svelte';
+  import TriggerControls from './lib/components/TriggerControls.svelte';
+  import SiggenControls from './lib/components/SiggenControls.svelte';
+  import CalibrationPanel from './lib/components/CalibrationPanel.svelte';
+  import PresetsPanel from './lib/components/PresetsPanel.svelte';
+  import DiagnosticsPanel from './lib/components/DiagnosticsPanel.svelte';
+  import DisplayControls from './lib/components/DisplayControls.svelte';
+  import AnalysisControls from './lib/components/AnalysisControls.svelte';
+  import CalibrationModal from './lib/modals/CalibrationModal.svelte';
+  import FirmwareSetupModal from './lib/modals/FirmwareSetupModal.svelte';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import {
     Connect, Disconnect, IsConnected, GetDeviceInfo,
@@ -101,15 +119,6 @@
     else measKeys.add(key);
     measKeys = new Set(measKeys); // trigger reactivity
   }
-  function fmtMeas(fmt, v) {
-    if (v == null || !isFinite(v)) return '—';
-    if (fmt === 'mv')   return fmtMv(v);
-    if (fmt === 'hz')   return fmtHz(v);
-    if (fmt === 'time') return fmtTime(v);
-    if (fmt === 'pct')  return v.toFixed(1) + '%';
-    return String(v);
-  }
-
   // Math channel + cursors + XY mode
   let mathOp = 'none';       // none | add | sub | mul | inva | invb
   let cursorsOn = false;
@@ -192,12 +201,9 @@
   // Streaming JS-side ring buffers (kept independent from the C ring buffer).
   // Circular buffer with a fixed pre-allocation so large rings don't hammer GC
   // (re-allocating a 1 M Float32Array at 55 Hz = ~220 MB/s churn, which froze
-  // the canvas in the previous implementation). 1 M samples ≈ 1.3 s of Fast-
-  // streaming history (≈ 780 kS/s) or ~2.9 hours at Native (~100 S/s). Visible
-  // slices are materialized on demand below.
+  // the canvas in the previous implementation).
   // 4M samples ≈ 5.37 s at fast-streaming dt=1280 ns, enough to cover up to
   // 500 ms/div × 10 divisions. At 2 channels × 4 bytes that's 32 MB — fine.
-  const RING_CAP = 4_194_304;
   let streamRingA = null;   // Float32Array(RING_CAP) — allocated on first use
   let streamRingB = null;
   let streamRingALen  = 0;  // valid sample count (≤ RING_CAP)
@@ -425,17 +431,6 @@
     } catch (e) { showError(String(e)); }
   }
 
-  function fmtMv(v) {
-    if (v === null || v === undefined) return '--';
-    if (Math.abs(v) >= 1000) return (v / 1000).toFixed(2) + ' V';
-    return v.toFixed(1) + ' mV';
-  }
-  function fmtHz(v) {
-    if (!v || !isFinite(v) || v <= 0) return '--';
-    if (v >= 1e6) return (v / 1e6).toFixed(2) + ' MHz';
-    if (v >= 1e3) return (v / 1e3).toFixed(2) + ' kHz';
-    return v.toFixed(1) + ' Hz';
-  }
   /* ------------ Calibration handlers ------------ */
   let calModalOpen = false;
   let fwModalOpen = false;
@@ -666,55 +661,6 @@
   // Radix-2 Cooley-Tukey FFT on real input. Input is padded/truncated to
   // the nearest power of 2, windowed with Hann, and returned as magnitude
   // in dBFS-normalized-to-1.0. Output length is N/2 (positive frequencies).
-  function fftMag(samples, fs) {
-    if (!samples || samples.length < 16) return null;
-    // Pick N = largest power of 2 <= samples.length, cap at 8192 (plenty for scope).
-    let N = 1;
-    while (N * 2 <= samples.length && N * 2 <= 8192) N *= 2;
-    if (N < 16) return null;
-    // Window (Hann) + copy to complex arrays
-    const re = new Float64Array(N);
-    const im = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-      const w = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-      re[i] = samples[i] * w;
-    }
-    // Bit-reverse permutation
-    for (let i = 1, j = 0; i < N; i++) {
-      let bit = N >> 1;
-      for (; j & bit; bit >>= 1) j ^= bit;
-      j ^= bit;
-      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
-    }
-    // Butterflies
-    for (let size = 2; size <= N; size *= 2) {
-      const half = size / 2;
-      const ang = -2 * Math.PI / size;
-      for (let i = 0; i < N; i += size) {
-        for (let k = 0; k < half; k++) {
-          const c = Math.cos(ang * k), s = Math.sin(ang * k);
-          const tr = c * re[i + k + half] - s * im[i + k + half];
-          const ti = s * re[i + k + half] + c * im[i + k + half];
-          re[i + k + half] = re[i + k] - tr;
-          im[i + k + half] = im[i + k] - ti;
-          re[i + k] += tr;
-          im[i + k] += ti;
-        }
-      }
-    }
-    // Magnitude (dB, normalized so pure sinusoid at full-scale ≈ 0 dB)
-    const M = N / 2;
-    const mag = new Float64Array(M);
-    const freq = new Float64Array(M);
-    const norm = 2 / N;
-    for (let i = 0; i < M; i++) {
-      const m = Math.sqrt(re[i] * re[i] + im[i] * im[i]) * norm;
-      mag[i] = 20 * Math.log10(Math.max(m, 1e-6));
-      freq[i] = i * fs / N;
-    }
-    return { freq, mag, n: N, fs };
-  }
-
   $: fftResult = (fftOn && visible && visible.samplesA && visible.samplesA.length >= 16 && viewDtNs > 0)
     ? fftMag(visible.samplesA, 1e9 / viewDtNs)
     : null;
@@ -783,111 +729,20 @@
 
   $: if (fftOn && fftResult) drawFft();
 
-  function fmtRate(v) {
-    if (!v) return '--';
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + ' MS/s';
-    if (v >= 1e3) return (v / 1e3).toFixed(0) + ' kS/s';
-    return v.toFixed(0) + ' S/s';
+  /* Ring buffer ops are pure functions in lib/dsp/ring.js; App.svelte owns
+   * the (buf, head, len) cursors and wraps push/clear for reactivity. */
+  function pushA(arr) {
+    if (!arr || !arr.length) return;
+    if (!streamRingA) streamRingA = createRing();
+    const r = pushRing(streamRingA, streamRingHeadA, streamRingALen, arr);
+    streamRingHeadA = r.head; streamRingALen = r.len;
   }
-
-  function fmtCount(v) {
-    if (!v) return '0';
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
-    return String(v);
+  function pushB(arr) {
+    if (!arr || !arr.length) return;
+    if (!streamRingB) streamRingB = createRing();
+    const r = pushRing(streamRingB, streamRingHeadB, streamRingBLen, arr);
+    streamRingHeadB = r.head; streamRingBLen = r.len;
   }
-
-  function fmtTime(ns) {
-    const abs = Math.abs(ns);
-    if (abs < 1e3)  return ns.toFixed(0) + ' ns';
-    if (abs < 1e6)  return (ns / 1e3).toFixed(abs < 1e4 ? 2 : 1) + ' µs';
-    if (abs < 1e9)  return (ns / 1e6).toFixed(abs < 1e7 ? 2 : 1) + ' ms';
-    return (ns / 1e9).toFixed(abs < 1e10 ? 2 : 1) + ' s';
-  }
-
-  /* Circular ring helpers. The backing Float32Array is allocated once and
-   * reused; only the (head, len) cursors are updated on each push, so GC
-   * stays quiet even at 55+ blocks/s. */
-  function ensureRings() {
-    if (!streamRingA) streamRingA = new Float32Array(RING_CAP);
-    if (!streamRingB) streamRingB = new Float32Array(RING_CAP);
-  }
-
-  function pushRing(which, arr) {
-    if (!arr || arr.length === 0) return;
-    ensureRings();
-    const buf = which === 'A' ? streamRingA : streamRingB;
-    let head  = which === 'A' ? streamRingHeadA : streamRingHeadB;
-    let len   = which === 'A' ? streamRingALen  : streamRingBLen;
-    const n = arr.length;
-    if (n >= RING_CAP) {
-      // Incoming block is larger than the ring — keep only its tail.
-      const start = n - RING_CAP;
-      for (let i = 0; i < RING_CAP; i++) buf[i] = arr[start + i];
-      head = 0; len = RING_CAP;
-    } else {
-      const firstLen = Math.min(n, RING_CAP - head);
-      for (let i = 0; i < firstLen; i++) buf[head + i] = arr[i];
-      const rem = n - firstLen;
-      for (let i = 0; i < rem; i++) buf[i] = arr[firstLen + i];
-      head = (head + n) % RING_CAP;
-      len  = Math.min(RING_CAP, len + n);
-    }
-    if (which === 'A') { streamRingHeadA = head; streamRingALen = len; }
-    else               { streamRingHeadB = head; streamRingBLen = len; }
-  }
-
-  // Cap materialized slice length. The canvas is ~1200 px wide and draws a
-  // min/max envelope per column, so anything above ~4 samples/px wastes GC
-  // budget with no visual benefit. 16 k output samples keeps the allocation
-  // small (64 kB per channel per frame) while preserving every spike via
-  // interleaved max/min pairs. Without this cap, a 4 M-sample slice churns
-  // 16 MB per frame per channel and the event loop stalls/crashes.
-  const MATERIALIZE_MAX = 16_384;
-
-  /** Copy logical samples [start, end) out of the circular ring into a
-   *  fresh Float32Array (chronological: index 0 = oldest in the slice).
-   *  When the requested range is much larger than MATERIALIZE_MAX, we return
-   *  a min/max-envelope compaction — the canvas's own per-column envelope
-   *  logic will still reconstruct the trace identically from it. */
-  function materializeRing(buf, head, len, start, end) {
-    if (!buf || len <= 0) return null;
-    start = Math.max(0, Math.min(start, len));
-    end   = Math.max(start, Math.min(end, len));
-    const n = end - start;
-    if (n === 0) return null;
-    const oldest = ((head - len) % RING_CAP + RING_CAP) % RING_CAP;
-
-    if (n <= MATERIALIZE_MAX) {
-      const readStart = (oldest + start) % RING_CAP;
-      const out = new Float32Array(n);
-      const firstLen = Math.min(n, RING_CAP - readStart);
-      out.set(buf.subarray(readStart, readStart + firstLen), 0);
-      if (firstLen < n) out.set(buf.subarray(0, n - firstLen), firstLen);
-      return out;
-    }
-
-    // Downsample: MATERIALIZE_MAX/2 buckets, each emitting [max, min] so the
-    // canvas envelope preserves the signal extremes.
-    const buckets = MATERIALIZE_MAX >> 1;
-    const out = new Float32Array(buckets * 2);
-    const baseIdx = oldest + start;
-    for (let b = 0; b < buckets; b++) {
-      const sStart = Math.floor((b * n) / buckets);
-      const sEnd   = Math.floor(((b + 1) * n) / buckets);
-      let mn = Infinity, mx = -Infinity;
-      for (let i = sStart; i < sEnd; i++) {
-        const v = buf[(baseIdx + i) % RING_CAP];
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-      }
-      if (mn === Infinity) { mn = 0; mx = 0; }
-      out[2 * b]     = mx;
-      out[2 * b + 1] = mn;
-    }
-    return out;
-  }
-
   function clearRings() {
     streamRingHeadA = 0; streamRingHeadB = 0;
     streamRingALen  = 0; streamRingBLen  = 0;
@@ -1023,8 +878,8 @@
         if (data.rangeMvA)   lastStreamRangeMvA = data.rangeMvA;
         if (data.rangeMvB)   lastStreamRangeMvB = data.rangeMvB;
         if (!streamPaused) {
-          pushRing('A', data.channelA);
-          pushRing('B', data.channelB);
+          pushA(data.channelA);
+          pushB(data.channelB);
         }
         // Keep waveformData around so single-shot fallbacks still work.
         waveformData = data;
@@ -1175,116 +1030,6 @@
   // Full scope-style measurements: min, max, mean, pp, RMS, frequency,
   // period, duty cycle — estimated over the visible slice with simple
   // zero-crossing detection (with hysteresis to resist DAC noise).
-  function computeMeas(d, dtNs) {
-    if (!d || d.length < 4 || !dtNs || dtNs <= 0) return null;
-    let mn = d[0], mx = d[0], sum = 0;
-    for (let i = 0; i < d.length; i++) {
-      if (d[i] < mn) mn = d[i];
-      if (d[i] > mx) mx = d[i];
-      sum += d[i];
-    }
-    const mean = sum / d.length;
-    let sqsum = 0;
-    for (let i = 0; i < d.length; i++) sqsum += (d[i] - mean) * (d[i] - mean);
-    const rms = Math.sqrt(sqsum / d.length);
-
-    // Frequency via hysteresis rising-edge detection. Schmitt trigger: we
-    // only register a rising edge when the signal crosses highT AFTER
-    // having been below lowT (5 % hysteresis on each side of the mean).
-    const hyst = Math.max(1, (mx - mn) * 0.05);
-    const highT = mean + hyst;
-    const lowT  = mean - hyst;
-    const rising = [];
-    let state = 0;           // +1 = above highT, -1 = below lowT, 0 = between
-    let nHigh = 0, nLow = 0; // for duty cycle
-    for (let i = 0; i < d.length; i++) {
-      const v = d[i];
-      if (v >= highT) {
-        if (state === -1) rising.push(i);  // low → high crossing
-        state = 1; nHigh++;
-      } else if (v <= lowT) {
-        state = -1; nLow++;
-      }
-    }
-    let freqHz = 0, periodNs = 0;
-    if (rising.length >= 2) {
-      const spanSamples = rising[rising.length - 1] - rising[0];
-      const periods = rising.length - 1;
-      const periodSamp = spanSamples / periods;
-      periodNs = periodSamp * dtNs;
-      if (periodNs > 0) freqHz = 1e9 / periodNs;
-    }
-    const totalActive = nHigh + nLow;
-    const duty = totalActive > 0 ? 100 * nHigh / totalActive : 0;
-
-    // Rise/fall time: find the first clean edge, measure 10-90% crossings.
-    // "Clean" = amplitude already swings at least 20 % of pp between lowT
-    // and highT, so noisy DC signals don't register spurious sub-ms times.
-    const { rise: riseNs, fall: fallNs } = edgeTimes(d, mn, mx, dtNs);
-
-    return { min: mn, max: mx, mean, vpp: mx - mn, rms, freqHz, periodNs,
-             duty, riseNs, fallNs };
-  }
-
-  function edgeTimes(d, mn, mx, dtNs) {
-    const pp = mx - mn;
-    if (pp < 10 || d.length < 4) return { rise: 0, fall: 0 };
-    const lvl10 = mn + 0.10 * pp;
-    const lvl90 = mn + 0.90 * pp;
-    // Fractional linear-interpolation helper between sample i-1 and i.
-    const crossAt = (i, lvl) => {
-      const a = d[i-1], b = d[i];
-      if (b === a) return i;
-      return (i - 1) + (lvl - a) / (b - a);
-    };
-    let rise = 0, fall = 0;
-    // --- Rise: find first sample <= lvl10, then next > lvl90 ---
-    let found10 = -1;
-    for (let i = 1; i < d.length; i++) {
-      if (found10 < 0) {
-        if (d[i-1] <= lvl10 && d[i] > lvl10) found10 = crossAt(i, lvl10);
-      } else {
-        if (d[i-1] < lvl90 && d[i] >= lvl90) {
-          rise = (crossAt(i, lvl90) - found10) * dtNs;
-          break;
-        }
-      }
-    }
-    // --- Fall: first > lvl90, then <= lvl10 ---
-    let found90 = -1;
-    for (let i = 1; i < d.length; i++) {
-      if (found90 < 0) {
-        if (d[i-1] >= lvl90 && d[i] < lvl90) found90 = crossAt(i, lvl90);
-      } else {
-        if (d[i-1] > lvl10 && d[i] <= lvl10) {
-          fall = (crossAt(i, lvl10) - found90) * dtNs;
-          break;
-        }
-      }
-    }
-    return { rise, fall };
-  }
-
-  // Compute a math channel on two aligned samples arrays. Returns a new
-  // Float64Array (or null) matching the shorter of the two.
-  function computeMath(op, a, b) {
-    if (op === 'none') return null;
-    const na = a ? a.length : 0;
-    const nb = b ? b.length : 0;
-    if (op === 'inva' && !a) return null;
-    if (op === 'invb' && !b) return null;
-    if ((op === 'add' || op === 'sub' || op === 'mul') && (!a || !b)) return null;
-    const n = op === 'inva' ? na : op === 'invb' ? nb : Math.min(na, nb);
-    if (n <= 0) return null;
-    const out = new Float64Array(n);
-    if (op === 'add')      for (let i = 0; i < n; i++) out[i] = a[i] + b[i];
-    else if (op === 'sub') for (let i = 0; i < n; i++) out[i] = a[i] - b[i];
-    else if (op === 'mul') for (let i = 0; i < n; i++) out[i] = (a[i] * b[i]) / 1000; // mV*mV/1000 ≈ V·mV
-    else if (op === 'inva')for (let i = 0; i < n; i++) out[i] = -a[i];
-    else if (op === 'invb')for (let i = 0; i < n; i++) out[i] = -b[i];
-    return out;
-  }
-
   $: mathTrace = computeMath(mathOp, visible.samplesA, visible.samplesB);
 
   $: {
@@ -1296,43 +1041,12 @@
   }
 
   // ---- Rolling statistics (min/max/avg of each measurement over last N frames).
-  const STATS_WINDOW = 50;
   let statsEnabled = false;
-  const STATS_FIELDS = ['vpp', 'mean', 'rms', 'freqHz', 'duty'];
-  function makeEmptyStats() {
-    const out = {};
-    for (const k of STATS_FIELDS) out[k] = [];
-    return out;
-  }
   let statsA = makeEmptyStats();
   let statsB = makeEmptyStats();
-  function pushStat(bag, m) {
-    if (!m) return;
-    for (const k of STATS_FIELDS) {
-      const v = m[k];
-      if (typeof v !== 'number' || !isFinite(v)) continue;
-      bag[k].push(v);
-      if (bag[k].length > STATS_WINDOW) bag[k].shift();
-    }
-  }
-  function statAgg(arr) {
-    if (!arr || arr.length === 0) return null;
-    let mn = arr[0], mx = arr[0], s = 0;
-    for (const v of arr) { if (v < mn) mn = v; if (v > mx) mx = v; s += v; }
-    return { min: mn, max: mx, avg: s / arr.length, n: arr.length };
-  }
-  // Accumulate only when stats are enabled — otherwise feed in zero-ops.
   $: if (statsEnabled) { pushStat(statsA, measA); pushStat(statsB, measB); }
-  $: statsADisplay = statsEnabled ? {
-    vpp: statAgg(statsA.vpp), mean: statAgg(statsA.mean),
-    rms: statAgg(statsA.rms), freqHz: statAgg(statsA.freqHz),
-    duty: statAgg(statsA.duty),
-  } : null;
-  $: statsBDisplay = statsEnabled ? {
-    vpp: statAgg(statsB.vpp), mean: statAgg(statsB.mean),
-    rms: statAgg(statsB.rms), freqHz: statAgg(statsB.freqHz),
-    duty: statAgg(statsB.duty),
-  } : null;
+  $: statsADisplay = statsEnabled ? aggregateStatsBag(statsA) : null;
+  $: statsBDisplay = statsEnabled ? aggregateStatsBag(statsB) : null;
   function resetStats() { statsA = makeEmptyStats(); statsB = makeEmptyStats(); }
 
   // --- Controls wiring ---
@@ -1543,229 +1257,49 @@
   <div class="main-area">
     <!-- Sidebar -->
     <div class="sidebar">
-      <!-- Channel A -->
-      <details class="panel" open>
-        <summary>
-          <span class="ch-dot" style="background: {chAEnabled ? '#00ff88' : '#333'}"></span>
-          Channel A
-        </summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>
-              <span class="toggle-label">
-                <input type="checkbox" bind:checked={chAEnabled} on:change={updateChannelA}>
-                Enabled
-              </span>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Coupling</label>
-            <select bind:value={chACoupling} on:change={updateChannelA}>
-              <option value="DC">DC</option>
-              <option value="AC">AC</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Range</label>
-            <select bind:value={chARange} on:change={updateChannelA}>
-              {#each RANGES as r}
-                <option value={r}>{r}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Offset mV</label>
-            <input type="number" bind:value={offsetMvA} step="50" title="Vertical offset (mV, added to trace)">
-          </div>
-          <div class="form-row">
-            <label>V/div mV</label>
-            <input type="number" bind:value={vdivMvA} min="0" step="10" title="0 = auto from range">
-          </div>
-        </div>
-      </details>
+      <ChannelPanel label="Channel A" dotColor="#00ff88" ranges={RANGES} panelOpen
+                    bind:enabled={chAEnabled} bind:coupling={chACoupling}
+                    bind:range={chARange} bind:offsetMv={offsetMvA} bind:vdivMv={vdivMvA}
+                    onChange={updateChannelA} />
 
-      <!-- Channel B -->
-      <details class="panel">
-        <summary>
-          <span class="ch-dot" style="background: {chBEnabled ? '#ffd700' : '#333'}"></span>
-          Channel B
-        </summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>
-              <span class="toggle-label">
-                <input type="checkbox" bind:checked={chBEnabled} on:change={updateChannelB}>
-                Enabled
-              </span>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Coupling</label>
-            <select bind:value={chBCoupling} on:change={updateChannelB}>
-              <option value="DC">DC</option>
-              <option value="AC">AC</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Range</label>
-            <select bind:value={chBRange} on:change={updateChannelB}>
-              {#each RANGES as r}
-                <option value={r}>{r}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Offset mV</label>
-            <input type="number" bind:value={offsetMvB} step="50" title="Vertical offset (mV)">
-          </div>
-          <div class="form-row">
-            <label>V/div mV</label>
-            <input type="number" bind:value={vdivMvB} min="0" step="10" title="0 = auto from range">
-          </div>
-        </div>
-      </details>
+      <ChannelPanel label="Channel B" dotColor="#ffd700" ranges={RANGES}
+                    bind:enabled={chBEnabled} bind:coupling={chBCoupling}
+                    bind:range={chBRange} bind:offsetMv={offsetMvB} bind:vdivMv={vdivMvB}
+                    onChange={updateChannelB} />
 
       <!-- Timebase -->
-      <details class="panel" open>
-        <summary>Timebase</summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>TB</label>
-            <select bind:value={timebase} on:change={updateTimebase}>
-              {#each timebases as tb, i}
-                <option value={i}>{i} - {tb.label}</option>
-              {/each}
-              {#if timebases.length === 0}
-                {#each Array(11) as _, i}
-                  <option value={i}>{i}</option>
-                {/each}
-              {/if}
-            </select>
-          </div>
-          {#if tbLabel}
-            <div class="form-row">
-              <label>Interval</label>
-              <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">{tbLabel}/sample</span>
-            </div>
-          {/if}
-          <div class="form-row">
-            <label>Samples</label>
-            <input type="number" bind:value={samples}
-                   on:change={updateSamples}
-                   min="64" max={maxSamples} step="64"
-                   disabled={!connected}>
-          </div>
-          <div class="form-row">
-            <label>Max</label>
-            <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">
-              {maxSamples} {chAEnabled && chBEnabled ? '(dual)' : '(single)'}
-            </span>
-          </div>
-        </div>
-      </details>
+      <TimebaseControls
+        bind:timebase bind:samples
+        {timebases} {maxSamples} {tbLabel} {connected}
+        dual={chAEnabled && chBEnabled}
+        onTimebaseChange={updateTimebase}
+        onSamplesChange={updateSamples} />
 
       <!-- Trigger -->
-      <details class="panel">
-        <summary>Trigger</summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>
-              <span class="toggle-label">
-                <input type="checkbox" bind:checked={triggerEnabled} on:change={updateTrigger}>
-                Enabled
-              </span>
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Source</label>
-            <select bind:value={triggerSource} on:change={updateTrigger} disabled={!triggerEnabled}>
-              <option value="A">Channel A</option>
-              <option value="B">Channel B</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Level</label>
-            <input type="number" bind:value={triggerThreshold} on:change={updateTrigger}
-                   disabled={!triggerEnabled} step="100" placeholder="mV">
-          </div>
-          <div class="form-row">
-            <label>Edge</label>
-            <select bind:value={triggerDirection} on:change={updateTrigger} disabled={!triggerEnabled}>
-              <option value="rising">Rising</option>
-              <option value="falling">Falling</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Auto ms</label>
-            <input type="number" bind:value={triggerAutoMs} on:change={updateTrigger}
-                   disabled={!triggerEnabled} min="0" step="100">
-          </div>
-        </div>
-      </details>
+      <TriggerControls
+        bind:enabled={triggerEnabled}
+        bind:source={triggerSource}
+        bind:threshold={triggerThreshold}
+        bind:direction={triggerDirection}
+        bind:autoMs={triggerAutoMs}
+        onChange={updateTrigger} />
 
       <!-- Signal Generator -->
-      <details class="panel">
-        <summary>Signal Generator</summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>Wave</label>
-            <select bind:value={siggenWave}>
-              {#each WAVE_TYPES as w}
-                <option value={w}>{w}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Freq Hz</label>
-            <input type="number" bind:value={siggenFreq} min="1" max="100000" step="100">
-          </div>
-          <div class="form-row">
-            <label>Ampl mVpp</label>
-            <input type="number" bind:value={siggenAmpMv} min="50" max="2000" step="50">
-          </div>
-          <div class="form-row">
-            <label>Offset mV</label>
-            <input type="number" bind:value={siggenOffsetMv} min="-2000" max="2000" step="50">
-          </div>
-          {#if siggenWave === 'square'}
-            <div class="form-row">
-              <label>Duty %</label>
-              <input type="number" bind:value={siggenDuty} min="1" max="99" step="1">
-            </div>
-          {/if}
-          <div class="form-row">
-            <label>
-              <span class="toggle-label">
-                <input type="checkbox" bind:checked={siggenSweep}>
-                Sweep
-              </span>
-            </label>
-          </div>
-          {#if siggenSweep}
-            <div class="form-row">
-              <label>Stop Hz</label>
-              <input type="number" bind:value={siggenStopFreq} min="1" max="100000" step="100">
-            </div>
-            <div class="form-row">
-              <label>Step Hz</label>
-              <input type="number" bind:value={siggenSweepInc} min="1" max="10000" step="10">
-            </div>
-            <div class="form-row">
-              <label>Dwell s</label>
-              <input type="number" bind:value={siggenSweepDwell} min="0.001" max="0.35" step="0.01">
-            </div>
-          {/if}
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={handleSiggenOn} disabled={!connected}>
-              {siggenEnabled ? 'Update' : 'Enable'}
-            </button>
-            <button class="btn btn-danger" on:click={handleSiggenOff}
-                    disabled={!connected || !siggenEnabled}>
-              Disable
-            </button>
-          </div>
-        </div>
-      </details>
+      <SiggenControls
+        waveTypes={WAVE_TYPES}
+        bind:wave={siggenWave}
+        bind:freq={siggenFreq}
+        bind:ampMv={siggenAmpMv}
+        bind:offsetMv={siggenOffsetMv}
+        bind:duty={siggenDuty}
+        bind:sweep={siggenSweep}
+        bind:stopFreq={siggenStopFreq}
+        bind:sweepInc={siggenSweepInc}
+        bind:sweepDwell={siggenSweepDwell}
+        {connected}
+        enabled={siggenEnabled}
+        onEnable={handleSiggenOn}
+        onDisable={handleSiggenOff} />
 
       <!-- Protocol Decoder -->
       <details class="panel">
@@ -1790,128 +1324,28 @@
       </details>
 
       <!-- Calibration -->
-      <details class="panel">
-        <summary>Calibration</summary>
-        <div class="panel-content">
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={() => calModalOpen = true}
-                    disabled={!connected}>
-              Open calibration editor
-            </button>
-          </div>
-          <div class="form-row" style="margin-top:8px;">
-            <span class="meas-label">Or quick actions:</span>
-          </div>
-          <div class="form-row">
-            <span class="meas-label">Short your inputs (or leave them floating) to 0 V, then click:</span>
-          </div>
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={handleCalibrateDCOffset}
-                    disabled={!connected || isStreaming}>
-              Auto-calibrate DC offset
-            </button>
-          </div>
-          <div class="form-row" style="margin-top:8px;">
-            <span class="meas-label">Manual per-range:</span>
-          </div>
-          <div class="form-row">
-            <label>Range</label>
-            <select bind:value={calRange}>
-              {#each RANGES as r}<option value={r}>{r}</option>{/each}
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Offset mV</label>
-            <input type="number" bind:value={calOffsetMv} step="1">
-          </div>
-          <div class="form-row">
-            <label>Gain</label>
-            <input type="number" bind:value={calGain} step="0.01" min="0.1" max="5">
-          </div>
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={handleSetRangeCal}
-                    disabled={!connected}>Apply to range</button>
-          </div>
-        </div>
-      </details>
+      <CalibrationPanel
+        ranges={RANGES}
+        bind:range={calRange}
+        bind:offsetMv={calOffsetMv}
+        bind:gain={calGain}
+        {connected} {isStreaming}
+        onOpenEditor={() => calModalOpen = true}
+        onAutoCalibrate={handleCalibrateDCOffset}
+        onApply={handleSetRangeCal} />
 
       <!-- Presets -->
-      <details class="panel">
-        <summary>Presets</summary>
-        <div class="panel-content">
-          <div class="form-row">
-            <label>Name</label>
-            <input type="text" bind:value={presetName} placeholder="e.g. 1kHz sine test">
-          </div>
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={handlePresetSave}>Save current</button>
-          </div>
-          {#if Object.keys(presets).length > 0}
-            <div class="form-row">
-              <label>Load</label>
-              <select bind:value={selectedPreset}>
-                <option value="">—</option>
-                {#each Object.keys(presets) as name}
-                  <option value={name}>{name}</option>
-                {/each}
-              </select>
-            </div>
-            <div class="panel-actions">
-              <button class="btn btn-primary" on:click={handlePresetLoad}
-                      disabled={!selectedPreset}>Load</button>
-              <button class="btn btn-danger" on:click={handlePresetDelete}
-                      disabled={!selectedPreset}>Delete</button>
-            </div>
-          {/if}
-        </div>
-      </details>
+      <PresetsPanel
+        {presets}
+        bind:presetName
+        bind:selected={selectedPreset}
+        onSave={handlePresetSave}
+        onLoad={handlePresetLoad}
+        onDelete={handlePresetDelete} />
 
       <!-- Diagnostics -->
-      <details class="panel">
-        <summary>Diagnostics</summary>
-        <div class="panel-content">
-          <div class="panel-actions">
-            <button class="btn btn-primary" on:click={handleCaptureRaw}
-                    disabled={!connected || isStreaming}>
-              Capture Raw
-            </button>
-          </div>
-          {#if rawPreview}
-            <div class="form-row">
-              <label>Bytes</label>
-              <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">
-                {rawPreview.numBytes}
-              </span>
-            </div>
-            <div class="form-row">
-              <label>Samples</label>
-              <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">
-                {rawPreview.numSamples}
-              </span>
-            </div>
-            <div class="form-row">
-              <label>Timebase</label>
-              <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">
-                {rawPreview.timebase} ({rawPreview.timebaseNs} ns)
-              </span>
-            </div>
-            <div class="form-row">
-              <label>Dual</label>
-              <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 12px;">
-                {rawPreview.dual ? 'yes (B,A,B,A tail)' : 'no (CH A only)'}
-              </span>
-            </div>
-            {#if rawPreview.bytes && rawPreview.bytes.length > 0}
-              <div class="form-row" style="flex-direction: column; align-items: flex-start; gap: 4px;">
-                <label>Head (hex)</label>
-                <span style="color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; word-break: break-all; line-height: 1.4;">
-                  {rawPreview.bytes.slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join(' ')}
-                </span>
-              </div>
-            {/if}
-          {/if}
-        </div>
-      </details>
+      <DiagnosticsPanel {connected} {isStreaming} {rawPreview}
+                        onCaptureRaw={handleCaptureRaw} />
     </div>
 
     <!-- Waveform display -->
@@ -1964,204 +1398,39 @@
       {/if}
 
       <!-- Scope controls strip -->
-      <div class="display-controls">
-        <span class="ctl-label">Time/div</span>
-
-        <div class="ctl-dropdown" bind:this={tdButton}>
-          <button type="button" class="ctl-dropdown-trigger"
-                  on:click={tdToggle}
-                  aria-haspopup="listbox" aria-expanded={tdOpen}>
-            {tdLabel} <span class="caret">▾</span>
-          </button>
-          {#if tdOpen}
-            <ul class="ctl-dropdown-menu" role="listbox">
-              {#each TIME_DIV_PRESETS as p}
-                <li class="ctl-dropdown-item"
-                    class:selected={p.ns === timePerDivNs}
-                    role="option"
-                    aria-selected={p.ns === timePerDivNs}
-                    on:click={(ev) => tdPick(p.ns, ev)}>
-                  {p.label}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-
-        <button class="ctl-btn" on:click={() => shiftDiv(-1)}
-                disabled={!offsetActive} title="Previous division">◁</button>
-        <button class="ctl-btn" on:click={() => shiftDiv(1)}
-                disabled={!offsetActive} title="Next division">▷</button>
-
-        {#if isStreaming}
-          <button class="ctl-btn" class:active={streamPaused}
-                  on:click={togglePause}
-                  title={streamPaused ? 'Resume live roll' : 'Pause streaming view'}>
-            {streamPaused ? '▶ Resume' : '⏸ Pause'}
-          </button>
-        {/if}
-
-        <button class="ctl-btn" on:click={fitView} title="Fit entire buffer">Fit</button>
-
-        <div class="dual-range" class:disabled={!dualRangeActive}
-             title="Drag either handle to define the visible window (start / end)">
-          <div class="dual-range-track"></div>
-          <div class="dual-range-fill"
-               style="left:{windowStartPct}%;right:{100 - windowEndPct}%"></div>
-          <input type="range" class="dual-range-input dual-range-min"
-                 min="0" max="100" step="0.1"
-                 value={windowStartPct}
-                 on:input={onRangeMinInput}
-                 disabled={!dualRangeActive}
-                 aria-label="Window start">
-          <input type="range" class="dual-range-input dual-range-max"
-                 min="0" max="100" step="0.1"
-                 value={windowEndPct}
-                 on:input={onRangeMaxInput}
-                 disabled={!dualRangeActive}
-                 aria-label="Window end">
-        </div>
-        <span class="ctl-spanlabel">
-          {#if visible.spanNs > 0}
-            {fmtTime(visible.spanNs)} span
-          {:else}
-            —
-          {/if}
-        </span>
-      </div>
+      <DisplayControls
+        presets={TIME_DIV_PRESETS}
+        {timePerDivNs} {tdLabel} {tdOpen}
+        bind:tdButton
+        {offsetActive} {dualRangeActive} {windowStartPct} {windowEndPct}
+        spanNs={visible.spanNs}
+        {isStreaming} {streamPaused}
+        onTdToggle={tdToggle}
+        onTdPick={tdPick}
+        onShiftDiv={shiftDiv}
+        onTogglePause={togglePause}
+        onFit={fitView}
+        {onRangeMinInput} {onRangeMaxInput} />
 
       <!-- Analysis controls: math, cursors, XY, persistence, averaging, FFT -->
-      <div class="display-controls">
-        <span class="ctl-label">Math</span>
-        <select class="select-inline" bind:value={mathOp}>
-          <option value="none">off</option>
-          <option value="add">A + B</option>
-          <option value="sub">A − B</option>
-          <option value="mul">A × B / 1000</option>
-          <option value="inva">−A</option>
-          <option value="invb">−B</option>
-        </select>
+      <AnalysisControls
+        bind:mathOp bind:cursorsOn bind:yCursorsOn bind:xyMode
+        bind:persistenceOn bind:avgN bind:fftOn
+        bind:measMenuOpen bind:measKeys
+        statsEnabled={statsEnabled}
+        catalog={MEAS_CATALOG}
+        measDefault={MEAS_DEFAULT}
+        canExportCsv={!!(visible.samplesA && visible.samplesA.length)}
+        {connected} {isStreaming}
+        onToggleStats={() => { statsEnabled = !statsEnabled; if (!statsEnabled) resetStats(); }}
+        onToggleMeasKey={toggleMeasKey}
+        onExportCSV={handleExportCSV}
+        onExportPNG={handleExportPNG}
+        onAuto={handleAutoSetup} />
 
-        <button class="ctl-btn" class:active={cursorsOn}
-                on:click={() => cursorsOn = !cursorsOn}
-                title="Vertical cursors (Δt / 1÷Δt)">Δt</button>
-
-        <button class="ctl-btn" class:active={yCursorsOn}
-                on:click={() => yCursorsOn = !yCursorsOn}
-                title="Horizontal cursors (ΔV)">ΔV</button>
-
-        <button class="ctl-btn" class:active={xyMode}
-                on:click={() => xyMode = !xyMode}
-                title="X-Y Lissajous mode (A vs B)">XY</button>
-
-        <button class="ctl-btn" class:active={persistenceOn}
-                on:click={() => persistenceOn = !persistenceOn}
-                title="Phosphor-like overlay">Persist</button>
-
-        <span class="ctl-label">Avg</span>
-        <select class="select-inline" bind:value={avgN}>
-          <option value={1}>1</option>
-          <option value={4}>4</option>
-          <option value={16}>16</option>
-          <option value={64}>64</option>
-        </select>
-
-        <button class="ctl-btn" class:active={fftOn}
-                on:click={() => fftOn = !fftOn}
-                title="Show FFT spectrum of CH A">FFT</button>
-
-        <button class="ctl-btn" class:active={statsEnabled}
-                on:click={() => { statsEnabled = !statsEnabled; if (!statsEnabled) resetStats(); }}
-                title="Accumulate min/max/avg of each measurement over last 50 captures">Stats</button>
-
-        <div class="meas-picker-wrap">
-          <button class="ctl-btn" class:active={measMenuOpen}
-                  on:click={() => measMenuOpen = !measMenuOpen}
-                  title="Choose which measurements appear in the bottom bar">Meas ▾</button>
-          {#if measMenuOpen}
-            <div class="meas-picker" on:click|stopPropagation>
-              <div class="meas-picker-title">Amplitude</div>
-              {#each MEAS_CATALOG.filter(m => m.group === 'amp') as m}
-                <label class="meas-picker-row">
-                  <input type="checkbox" checked={measKeys.has(m.key)}
-                         on:change={() => toggleMeasKey(m.key)} />
-                  <span>{m.label}</span>
-                </label>
-              {/each}
-              <div class="meas-picker-title">Time</div>
-              {#each MEAS_CATALOG.filter(m => m.group === 'time') as m}
-                <label class="meas-picker-row">
-                  <input type="checkbox" checked={measKeys.has(m.key)}
-                         on:change={() => toggleMeasKey(m.key)} />
-                  <span>{m.label}</span>
-                </label>
-              {/each}
-              <div class="meas-picker-actions">
-                <button class="ctl-btn" on:click={() => measKeys = new Set(MEAS_CATALOG.map(m => m.key))}>All</button>
-                <button class="ctl-btn" on:click={() => measKeys = new Set(MEAS_DEFAULT)}>Default</button>
-                <button class="ctl-btn" on:click={() => measKeys = new Set()}>None</button>
-              </div>
-            </div>
-          {/if}
-        </div>
-
-        <button class="ctl-btn" on:click={handleExportCSV}
-                disabled={!visible.samplesA || visible.samplesA.length === 0}
-                title="Export visible slice as CSV">CSV</button>
-
-        <button class="ctl-btn" on:click={handleExportPNG}
-                title="Save scope screenshot">PNG</button>
-
-        <button class="ctl-btn" on:click={handleAutoSetup}
-                disabled={!connected || isStreaming}
-                title="Analyse signal and auto-configure range + timebase + trigger">Auto</button>
-      </div>
-
-      <!-- Measurements -->
-      <div class="measurements-bar">
-        {#if measA}
-          <div class="meas-group">
-            <span class="meas-ch-a">CH A</span>
-            {#each MEAS_CATALOG as m}
-              {#if measKeys.has(m.key)}
-                <span class="meas-label">{m.label}:</span>
-                <span class="meas-value">{fmtMeas(m.fmt, measA[m.key])}</span>
-              {/if}
-            {/each}
-            {#if statsADisplay && statsADisplay.vpp && measKeys.has('vpp')}
-              <span class="meas-stats">(Vpp μ={fmtMv(statsADisplay.vpp.avg)} σ=[{fmtMv(statsADisplay.vpp.min)}..{fmtMv(statsADisplay.vpp.max)}] n={statsADisplay.vpp.n})</span>
-            {/if}
-          </div>
-        {/if}
-        {#if measB}
-          <div class="meas-group">
-            <span class="meas-ch-b">CH B</span>
-            {#each MEAS_CATALOG as m}
-              {#if measKeys.has(m.key)}
-                <span class="meas-label">{m.label}:</span>
-                <span class="meas-value">{fmtMeas(m.fmt, measB[m.key])}</span>
-              {/if}
-            {/each}
-            {#if statsBDisplay && statsBDisplay.vpp && measKeys.has('vpp')}
-              <span class="meas-stats">(Vpp μ={fmtMv(statsBDisplay.vpp.avg)} σ=[{fmtMv(statsBDisplay.vpp.min)}..{fmtMv(statsBDisplay.vpp.max)}] n={statsBDisplay.vpp.n})</span>
-            {/if}
-          </div>
-        {/if}
-        {#if measM}
-          <div class="meas-group">
-            <span class="meas-ch-m">MATH</span>
-            {#each MEAS_CATALOG as m}
-              {#if measKeys.has(m.key)}
-                <span class="meas-label">{m.label}:</span>
-                <span class="meas-value">{fmtMeas(m.fmt, measM[m.key])}</span>
-              {/if}
-            {/each}
-          </div>
-        {/if}
-        {#if !measA && !measB}
-          <span class="meas-label">No data</span>
-        {/if}
-      </div>
+      <MeasurementsBar {measA} {measB} {measM} {measKeys}
+                       catalog={MEAS_CATALOG}
+                       {statsADisplay} {statsBDisplay} />
     </div>
   </div>
 
@@ -2179,39 +1448,8 @@
                         } catch(e) {}
                       }} />
 
-  <!-- Status bar -->
-  <div class="status-bar">
-    <span>
-      <span class="status-dot" class:connected class:disconnected={!connected}></span>
-      {#if connected}Connected{:else}Disconnected{/if}
-    </span>
-
-    {#if serial}
-      <span>Serial: {serial}</span>
-    {/if}
-    {#if calDate}
-      <span>Cal: {calDate}</span>
-    {/if}
-
-    {#if isStreaming}
-      <span>
-        <span class="status-dot streaming"></span>
-        Streaming
-      </span>
-      {#if streamStats}
-        <span>{fmtRate(streamStats.samplesPerSec)}</span>
-        <span>{fmtCount(streamStats.totalSamples)} samples</span>
-        <span>{streamStats.lastBlockMs.toFixed(1)} ms/block</span>
-      {/if}
-    {/if}
-
-    {#if waveformData && !isStreaming}
-      <span>{waveformData.numSamples} samples</span>
-      <span>{timebases[waveformData.timebase] ? timebases[waveformData.timebase].label : ''}/sample</span>
-    {/if}
-  </div>
+  <StatusBar {connected} {serial} {calDate} {isStreaming} {streamStats}
+             {waveformData} {timebases} />
 </div>
 
-{#if errorMsg}
-  <div class="error-toast">{errorMsg}</div>
-{/if}
+<ErrorToast message={errorMsg} />

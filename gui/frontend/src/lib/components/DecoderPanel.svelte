@@ -14,8 +14,8 @@
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import {
     Decode, ListDecoders, StartDecoder, StopDecoder,
-  } from '../../wailsjs/go/main/App.js';
-  import { EventsOn } from '../../wailsjs/runtime/runtime.js';
+  } from '../../../wailsjs/go/main/App.js';
+  import { EventsOn } from '../../../wailsjs/runtime/runtime.js';
 
   /** @type {Float32Array|number[]|null} */ export let samplesA = null;
   /** @type {Float32Array|number[]|null} */ export let samplesB = null;
