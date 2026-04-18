@@ -5,11 +5,27 @@
 
 #include <jni.h>
 #include <stdlib.h>
+#include <android/log.h>
 #include "picoscope2204a.h"
 
 #define JNI_FN(name) Java_io_github_wasabules_ps2204_PicoScope2204A_##name
+#define LOG_TAG "ps2204a"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 
 /* Open / close ----------------------------------------------------------- */
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetFirmwareDir)(JNIEnv *env, jclass cls, jstring path)
+{
+    (void)cls;
+    if (!path) return -1;
+    const char *c = (*env)->GetStringUTFChars(env, path, NULL);
+    int rc = setenv("PS2204A_FIRMWARE_DIR", c, 1);
+    LOGI("firmware dir set to %s (rc=%d)", c, rc);
+    (*env)->ReleaseStringUTFChars(env, path, c);
+    return (jint)rc;
+}
 
 JNIEXPORT jlong JNICALL
 JNI_FN(nativeOpen)(JNIEnv *env, jclass cls, jint usb_fd)
@@ -17,7 +33,10 @@ JNI_FN(nativeOpen)(JNIEnv *env, jclass cls, jint usb_fd)
     (void)env; (void)cls;
     ps2204a_device_t *dev = NULL;
     ps_status_t st = ps2204a_open_with_fd(&dev, (int)usb_fd);
-    if (st != PS_OK) return 0;
+    if (st != PS_OK) {
+        LOGE("ps2204a_open_with_fd failed, status=%d", (int)st);
+        return 0;
+    }
     return (jlong)(intptr_t)dev;
 }
 

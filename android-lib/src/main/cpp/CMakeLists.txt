@@ -39,7 +39,8 @@ target_include_directories(picoscope2204a_static PUBLIC
 
 target_link_libraries(picoscope2204a_static PUBLIC
     usb-1.0
-    log         # Android __android_log_print
+    log         # Android __android_log_print (and __ANDROID__ is set
+                # automatically by the NDK toolchain)
 )
 
 target_compile_options(picoscope2204a_static PRIVATE

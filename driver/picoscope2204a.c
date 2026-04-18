@@ -2448,6 +2448,12 @@ ps_status_t ps2204a_open_with_fd(ps2204a_device_t **out, int usb_fd)
         return fw_st;
     }
 
+#ifdef __ANDROID__
+    /* Android apps can't enumerate /dev/bus/usb; we only ever wrap an FD
+     * handed in by UsbDeviceConnection, so disable the startup scan. */
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#endif
+
     int r = libusb_init(&dev->ctx);
     if (r < 0) {
         free_firmware(dev);

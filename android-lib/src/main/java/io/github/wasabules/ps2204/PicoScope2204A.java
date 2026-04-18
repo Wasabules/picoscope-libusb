@@ -66,6 +66,18 @@ public final class PicoScope2204A {
      *
      * @return opaque device handle, or 0 on failure
      */
+    /**
+     * Tell the native driver where to find the four firmware blobs
+     * ({@code fx2.bin}, {@code fpga.bin}, {@code stream_lut.bin},
+     * {@code waveform.bin}). Must be called before {@link #nativeOpen(int)}
+     * on Android — the driver otherwise searches Linux-desktop paths that
+     * app sandboxes can't read.
+     *
+     * @param path absolute path to a readable directory
+     * @return 0 on success, -1 on failure (e.g. null path)
+     */
+    public static native int nativeSetFirmwareDir(String path);
+
     public static native long nativeOpen(int usbFd);
 
     public static native void nativeClose(long handle);
