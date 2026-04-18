@@ -2,5 +2,5 @@
 // Individual module builds live in their own build.gradle.kts.
 
 plugins {
-    id("com.android.library") version "8.2.2" apply false
+    id("com.android.library") version "8.7.3" apply false
 }

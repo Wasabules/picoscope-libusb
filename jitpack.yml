@@ -10,6 +10,8 @@ jdk:
 before_install:
   - sdk install java 17.0.10-tem || true
   - sdk use java 17.0.10-tem || true
+  - sdk install gradle 8.11.1 || true
+  - sdk use gradle 8.11.1 || true
 
 install:
   - gradle :android-lib:assembleRelease :android-lib:publishToMavenLocal -x lint -x test
