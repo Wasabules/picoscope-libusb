@@ -2,8 +2,8 @@
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import {
     FirmwareStatus, ExtractFirmwareLive, ExtractFirmwareFromPcap, PickPcapFile
-  } from '../../wailsjs/go/main/App.js';
-  import { EventsOn } from '../../wailsjs/runtime/runtime.js';
+  } from '../../../wailsjs/go/main/App.js';
+  import { EventsOn } from '../../../wailsjs/runtime/runtime.js';
 
   export let open = false;
 

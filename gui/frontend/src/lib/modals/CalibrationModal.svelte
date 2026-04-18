@@ -3,7 +3,7 @@
   import {
     GetAllCalibration, ApplyCalibration,
     SetChannelA, SetChannelB, CaptureBlock
-  } from '../../wailsjs/go/main/App.js';
+  } from '../../../wailsjs/go/main/App.js';
 
   export let open = false;
 
