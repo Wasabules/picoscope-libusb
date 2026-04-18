@@ -64,19 +64,35 @@ minor tweaks — untested.
 
 ## Status
 
+### Driver
+
 | Feature | Status |
 |---|---|
 | Block capture (single / dual channel) | ✅ |
 | Fast block streaming (~330 kS/s) | ✅ |
 | Native streaming (~100 S/s, DC monitoring) | ✅ |
-| SDK-style continuous streaming (1 MS/s) | ✅ |
+| SDK-style continuous streaming (1 MS/s, gap-free) | ✅ |
 | Trigger: edge / window / PWQ | ✅ |
-| Trigger: ETS | ❌ not implemented |
+| Trigger: ETS (equivalent-time sampling) | ✅ |
+| Enhanced resolution (up to 12-bit via oversampling) | ✅ |
 | Signal generator: frequency | ✅ |
-| Signal generator: amplitude / offset | ⚠️ protocol not fully reverse-engineered |
-| DC offset calibration from EEPROM | ⚠️ ~3 % residual (EEPROM layout unknown) |
-| Protocol decoders (UART, I²C, SPI, CAN) | ✅ |
-| Time-code decoders (DCF77, IRIG-B, AFNOR) | ✅ |
+| Signal generator: arbitrary waveform (AWG + LUT) | ✅ code path integrated |
+| Signal generator: amplitude / offset | ⚠️ HW unresponsive on tested unit |
+| DC offset calibration (factory table + runtime auto-fit) | ✅ |
+| Per-range gain/offset override API | ✅ |
+| EEPROM readout (serial, cal-date, raw pages) | ✅ |
+
+### GUI
+
+| Feature | Status |
+|---|---|
+| Live scope view with time/div, pan, zoom, pause | ✅ |
+| Measurements (Vpp, mean, RMS, freq, duty, rise/fall…) | ✅ |
+| FFT + cursors (X/Y) + persistence + XY mode + math | ✅ |
+| Protocol decoders: UART, I²C, SPI, CAN | ✅ |
+| Time-code decoders: DCF77, IRIG-B, AFNOR | ✅ |
+| CSV + PNG export, preset save/load | ✅ |
+| Firmware extraction wizard (first-launch) | ✅ |
 
 See [`docs/protocol.md`](docs/protocol.md) for the reverse-engineered protocol
 reference.
