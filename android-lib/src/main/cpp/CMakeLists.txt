@@ -58,3 +58,10 @@ add_library(picoscope_jni SHARED
 target_link_libraries(picoscope_jni PRIVATE
     picoscope2204a_static
 )
+
+# Android 15+ requires 16 KB page-size alignment for shared libraries on
+# devices that use 16 KB pages (Pixel 8/9, certain tablets). Without this
+# the OS refuses to load the .so on those devices.
+target_link_options(picoscope_jni PRIVATE
+    "-Wl,-z,max-page-size=16384"
+)

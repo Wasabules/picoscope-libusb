@@ -112,6 +112,27 @@ ps_status_t ps2204a_open(ps2204a_device_t **dev);
  * The fd must be obtained via UsbDeviceConnection.getFileDescriptor(). */
 ps_status_t ps2204a_open_with_fd(ps2204a_device_t **dev, int usb_fd);
 
+/* Two-phase Android open.
+ *
+ * On Android, the FX2 firmware upload re-enumerates the USB device.
+ * The file descriptor we were handed via UsbDeviceConnection is then
+ * invalidated by the kernel, and Android's sandbox forbids scanning
+ * /dev/bus/usb to find the post-renum device. So the app must:
+ *
+ *   1. Call ps2204a_open_fd_stage1() with the initial fd. This loads
+ *      firmware blobs, uploads FX2, then releases the USB handle so
+ *      Android's UsbDeviceConnection can be cleanly closed.
+ *   2. Wait for the USB re-attach event (same VID/PID), request USB
+ *      permission, and obtain a new file descriptor.
+ *   3. Call ps2204a_open_fd_stage2() with the new fd. This resumes init
+ *      (ADC, FPGA, channel setup) and leaves the device fully open.
+ *
+ * On failure in stage2, the caller must still call ps2204a_close()
+ * to reclaim the allocation produced by stage1.
+ */
+ps_status_t ps2204a_open_fd_stage1(ps2204a_device_t **dev, int usb_fd);
+ps_status_t ps2204a_open_fd_stage2(ps2204a_device_t *dev, int new_usb_fd);
+
 /* Close device and free all resources. */
 void ps2204a_close(ps2204a_device_t *dev);
 

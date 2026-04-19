@@ -80,6 +80,35 @@ public final class PicoScope2204A {
 
     public static native long nativeOpen(int usbFd);
 
+    /**
+     * Android two-phase open — stage 1.
+     *
+     * <p>The FX2 firmware upload re-enumerates the USB device. On
+     * Android the original file descriptor is invalidated and the app
+     * cannot rescan /dev/bus/usb, so the caller must drive the
+     * re-enumeration themselves:</p>
+     *
+     * <ol>
+     *   <li>Call {@code nativeOpenStage1(fd)} with the fd obtained from
+     *       the first {@link android.hardware.usb.UsbDeviceConnection}.</li>
+     *   <li>Close that {@code UsbDeviceConnection}. Android emits
+     *       {@code USB_DEVICE_DETACHED} and shortly afterwards
+     *       {@code USB_DEVICE_ATTACHED} for the post-renum device.</li>
+     *   <li>Obtain USB permission + a new {@code UsbDeviceConnection}
+     *       for that device and call {@link #nativeOpenStage2(long, int)}
+     *       with its fd.</li>
+     * </ol>
+     *
+     * <p>On any stage2 failure the caller must still call
+     * {@link #nativeClose(long)} to reclaim the handle produced here.</p>
+     *
+     * @return opaque device handle, or 0 on failure
+     */
+    public static native long nativeOpenStage1(int usbFd);
+
+    /** @return 0 on success, negative {@code ps_status_t} otherwise */
+    public static native int nativeOpenStage2(long handle, int newUsbFd);
+
     public static native void nativeClose(long handle);
 
     public static native int nativeSetChannel(long handle, int channel,
@@ -92,11 +121,84 @@ public final class PicoScope2204A {
     /** @return sample buffer in mV, or {@code null} on failure */
     public static native float[] nativeCaptureBlock(long handle, int samples);
 
+    /**
+     * Dual-channel block capture. Returns a flat array of length {@code 2*actual}
+     * where the first {@code actual} floats are CH A and the next {@code actual}
+     * are CH B. Callers slice based on which channels they enabled. Returns
+     * {@code null} on failure.
+     */
+    public static native float[] nativeCaptureBlockDual(long handle, int samples);
+
+    /* Trigger directions — match ps_trigger_dir_t in the C driver. */
+    public static final int TRIGGER_RISING  = 0;
+    public static final int TRIGGER_FALLING = 1;
+
+    /**
+     * Configure a level trigger.
+     * @param source        {@link #CHANNEL_A} or {@link #CHANNEL_B}
+     * @param thresholdMv   trigger voltage in mV (within the source's range)
+     * @param direction     {@link #TRIGGER_RISING} or {@link #TRIGGER_FALLING}
+     * @param delayPct      trigger position, -100..+100 %
+     *                      (-100 = all pre-trigger, 0 = centred, +100 = all post)
+     * @param autoTriggerMs host-side timeout; 0 = normal (wait forever),
+     *                      &gt;0 = auto-fire after this delay if no edge seen
+     * @return 0 on success, negative error code otherwise
+     */
+    public static native int nativeSetTrigger(long handle, int source,
+                                              float thresholdMv, int direction,
+                                              float delayPct, int autoTriggerMs);
+
+    /** Revert to free-running (auto-trigger immediately). */
+    public static native int nativeDisableTrigger(long handle);
+
+    /**
+     * Push a (offset_mv, gain) correction for a given range. Captured samples
+     * are post-processed as {@code out = (raw − offset_mv) × gain}.
+     * @return 0 on success, negative error code otherwise
+     */
+    public static native int nativeSetRangeCalibration(long handle, int range,
+                                                       float offsetMv, float gain);
+
+    /**
+     * Read the current (offset_mv, gain) for a range.
+     * @return {@code float[]{offset_mv, gain}} or {@code null} on failure.
+     */
+    public static native float[] nativeGetRangeCalibration(long handle, int range);
+
+    /* Streaming modes — must match ps_stream_mode_t in the C driver. */
+    public static final int STREAM_FAST   = 0;
+    public static final int STREAM_NATIVE = 1;
+    public static final int STREAM_SDK    = 2;
+
     public static native int nativeStartStreaming(long handle, int intervalUs);
+
+    /**
+     * Start streaming with explicit mode selection.
+     * @param mode one of {@link #STREAM_FAST}, {@link #STREAM_NATIVE}, {@link #STREAM_SDK}
+     */
+    public static native int nativeStartStreamingMode(long handle, int mode,
+                                                      int intervalUs);
 
     public static native int nativeStopStreaming(long handle);
 
+    /** Per-sample time in ns for the currently-running stream (mode-dependent). */
+    public static native int nativeGetStreamingDtNs(long handle);
+
+    /**
+     * Streaming statistics snapshot.
+     * Returns {@code [blocks, total_samples, elapsed_s, samples_per_sec,
+     *                  blocks_per_sec, last_block_ms]} or {@code null}.
+     */
+    public static native double[] nativeGetStreamingStats(long handle);
+
     public static native float[] nativeGetLatest(long handle, int n);
+
+    /**
+     * Dual-channel latest fetch. Returns a flat array of length {@code 2*actual}
+     * where the first {@code actual} floats are CH A and the next {@code actual}
+     * are CH B. {@code null} on failure.
+     */
+    public static native float[] nativeGetLatestDual(long handle, int n);
 
     public static native int nativeSetSiggen(long handle, int waveType,
                                              float freqHz, int pkpkUv);
