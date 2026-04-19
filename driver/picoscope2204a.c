@@ -20,6 +20,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#define PS_LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "ps2204a-drv", fmt, ##__VA_ARGS__)
+#else
+#define PS_LOG(fmt, ...) fprintf(stderr, "[ps2204a] " fmt "\n", ##__VA_ARGS__)
+#endif
+
 /* ========================================================================
  * Constants
  * ======================================================================== */
@@ -174,6 +181,14 @@ struct ps2204a_device {
     uint8_t  siggen_duty_pct;          /* SQUARE duty cycle (0..100) */
     bool     siggen_use_arb;           /* use siggen_arb_lut instead of computing */
     int16_t  siggen_arb_lut[4096];
+    /* True once the user has configured an active siggen output (set by
+     * ps2204a_set_siggen*, cleared by disable). NOTE: on this hardware the
+     * DAC is silenced for the lifetime of PS_STREAM_SDK regardless of what
+     * LUT we upload (cmd1 buf_type=0x41 is a hardware multiplex — see
+     * siggen_ep06_streaming_conflict.md). This flag is kept for callers
+     * that still want to know a user siggen config is active. */
+    bool     siggen_configured;
+    uint32_t siggen_pkpk_uv;           /* remembered for LUT rebuild */
 
     /* Device info */
     char serial[16];
@@ -1939,9 +1954,11 @@ static const uint8_t SDK_SETUP_TB_GAIN[CMD_SIZE] = {
     0x02, 0x85, 0x04, 0x9a, 0x00, 0x00, 0x00, 0x85, 0x07, 0x97, 0x00, 0x14, 0x00, 0x3f, 0x04, 0x40
 };
 
-/* cmd2 with empty siggen (freq=0) — siggen is orthogonal to streaming. */
+/* cmd2 captured from SDK trace 2026-04-19 with siggen active + 1 µs sample
+ * interval. Bytes 7..14 appear to encode the streaming interval (prior dump
+ * with a different interval had `80 53 da e2 45 63 00 00` here). */
 static const uint8_t SDK_CMD2[CMD_SIZE] = {
-    0x02, 0x85, 0x0c, 0x86, 0x00, 0x40, 0x00, 0x80, 0x53, 0xda, 0xe2, 0x45, 0x63, 0x00, 0x00, 0x85,
+    0x02, 0x85, 0x0c, 0x86, 0x00, 0x40, 0x00, 0x90, 0xa7, 0xd2, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x85,
     0x05, 0x87, 0x00, 0x08, 0x00, 0x00, 0x85, 0x0b, 0x90, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x85, 0x08, 0x8a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x03, 0x00,
     0x02, 0x02, 0x0c, 0x03, 0x0a, 0x00, 0x00, 0x85, 0x04, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -1950,6 +1967,16 @@ static const uint8_t SDK_CMD2[CMD_SIZE] = {
 static const uint8_t SDK_TRIGGER[CMD_SIZE] = {
     0x02, 0x07, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00
 };
+
+/* Forward decls — the real siggen LUT/cmd builders live with the siggen
+ * public API below. sdk_streaming_thread injects the user's siggen LUT as
+ * a 3rd 9b/LUT/buftype1 phase so the DAC keeps running during the stream.
+ * Verified against SDK trace 2026-04-19 (packets [0035]/[0036]). */
+static void build_awg_lut(uint8_t *lut, ps_wave_t type, uint32_t pkpk_uv,
+                          int32_t offset_uv, uint8_t duty_pct);
+static void build_siggen_cmd(uint8_t *cmd, uint32_t freq_param,
+                             uint32_t stop_param, uint32_t inc_param,
+                             uint16_t dwell_samples);
 
 /* Build cmd1 for SDK streaming. Sample count is fixed at 10000 (as in trace),
  * buf bytes (0,0,100). Only the gain bytes vary with channel/range. */
@@ -2150,7 +2177,7 @@ static void *sdk_streaming_thread(void *arg)
                              (uint8_t *)SDK_SETUP_BUFTYPE1, CMD_SIZE,
                              &transferred, 1000) < 0) goto cleanup;
 
-    /* Second 9b setup (with real params) + second LUT + buf_type=1. */
+    /* Second 9b setup + second LUT + buf_type=1. */
     if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
                              (uint8_t *)SDK_SETUP_9B_B, CMD_SIZE,
                              &transferred, 1000) < 0) goto cleanup;
@@ -2163,6 +2190,54 @@ static void *sdk_streaming_thread(void *arg)
     if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
                              (uint8_t *)SDK_SETUP_TB_GAIN, CMD_SIZE,
                              &transferred, 1000) < 0) goto cleanup;
+
+    /* === Siggen injection phase (the SDK-trace fix) ===
+     *
+     * If the user has an active siggen config, the official SDK inserts a
+     * 3rd `85 04 9b + 85 21 8c` packet followed by the actual waveform LUT
+     * (and a BUFTYPE1 commit) right here — between TB_GAIN and cmd1/cmd2/
+     * trigger. Without this phase the FPGA loads stream_lut.bin (DC) into
+     * the DAC and siggen stays silent for the whole stream.
+     *
+     * Verified by diffing our replay against a trace captured with
+     * ps2000_set_sig_gen_built_in + ps2000_run_streaming_ns active on the
+     * real SDK (usb_trace.log packets [0035]/[0036]/[0037], 2026-04-19).
+     */
+    if (dev->siggen_configured) {
+        uint8_t siggen_cmd[CMD_SIZE];
+        build_siggen_cmd(siggen_cmd,
+                         dev->siggen_freq_param,
+                         dev->siggen_freq_stop_param > 0
+                             ? dev->siggen_freq_stop_param
+                             : dev->siggen_freq_param,
+                         dev->siggen_inc_param,
+                         dev->siggen_dwell_samples);
+        if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
+                                 siggen_cmd, CMD_SIZE,
+                                 &transferred, 1000) < 0) goto cleanup;
+
+        uint8_t siggen_lut[8192];
+        if (dev->siggen_use_arb) {
+            for (int i = 0; i < 4096; i++) {
+                siggen_lut[2*i]   = (uint8_t)( dev->siggen_arb_lut[i]       & 0xFF);
+                siggen_lut[2*i+1] = (uint8_t)((dev->siggen_arb_lut[i] >> 8) & 0xFF);
+            }
+        } else {
+            build_awg_lut(siggen_lut,
+                          (dev->siggen_freq_param == 0) ? PS_WAVE_DC
+                                                        : (ps_wave_t)dev->siggen_wave,
+                          dev->siggen_pkpk_uv ? dev->siggen_pkpk_uv : 1000000,
+                          dev->siggen_offset_uv,
+                          dev->siggen_duty_pct ? dev->siggen_duty_pct : 50);
+        }
+        int lut_transferred = 0;
+        if (libusb_bulk_transfer(dev->handle, EP_FW_OUT,
+                                 siggen_lut, sizeof(siggen_lut),
+                                 &lut_transferred, TIMEOUT_FW) < 0) goto cleanup;
+        if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
+                                 (uint8_t *)SDK_SETUP_BUFTYPE1, CMD_SIZE,
+                                 &transferred, 1000) < 0) goto cleanup;
+    }
 
     /* Give the FPGA a moment to stabilise after LUT uploads. */
     usleep(50000);
@@ -2247,21 +2322,13 @@ cleanup_mem:
  * Public API Implementation
  * ======================================================================== */
 
-static ps_status_t do_open(ps2204a_device_t *dev)
+/* Everything do_open() does after the FX2 upload + re-enumerate dance.
+ * Factored out so the Android two-phase open path can invoke it once the
+ * app has handed back a fresh USB file descriptor for the post-renum
+ * device. */
+static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
 {
     ps_status_t st;
-
-    printf("================================================\n");
-    printf("PicoScope 2204A — libusb C Driver\n");
-    printf("================================================\n");
-
-    /* Upload FX2 firmware */
-    printf("\n[1] FX2 firmware upload...\n");
-    st = upload_fx2(dev);
-    if (st != PS_OK) return st;
-
-    st = fx2_reenumerate(dev);
-    if (st != PS_OK) return st;
 
     /* ADC init */
     printf("\n[2] ADC initialization...\n");
@@ -2368,6 +2435,27 @@ static ps_status_t do_open(ps2204a_device_t *dev)
     printf("================================================\n");
 
     return PS_OK;
+}
+
+/* Full open path: used by desktop callers and by the single-phase
+ * ps2204a_open_with_fd helper. Assumes the caller has already wrapped a
+ * USB handle into dev->handle and claimed interface 0. */
+static ps_status_t do_open(ps2204a_device_t *dev)
+{
+    ps_status_t st;
+
+    printf("================================================\n");
+    printf("PicoScope 2204A — libusb C Driver\n");
+    printf("================================================\n");
+
+    printf("\n[1] FX2 firmware upload...\n");
+    st = upload_fx2(dev);
+    if (st != PS_OK) return st;
+
+    st = fx2_reenumerate(dev);
+    if (st != PS_OK) return st;
+
+    return do_open_post_reenum(dev);
 }
 
 ps_status_t ps2204a_open(ps2204a_device_t **out)
@@ -2489,6 +2577,112 @@ ps_status_t ps2204a_open_with_fd(ps2204a_device_t **out, int usb_fd)
 
     *out = dev;
     return PS_OK;
+}
+
+/* ------------------------------------------------------------------
+ * Android two-phase open
+ * ------------------------------------------------------------------
+ *
+ * On Android we cannot rescan /dev/bus/usb after the FX2 boots its new
+ * firmware (LIBUSB_OPTION_NO_DEVICE_DISCOVERY is set, and even without
+ * it the app sandbox forbids the scan). So the app has to perform the
+ * Android-side re-enumeration dance itself: hand us a pre-renum fd,
+ * wait for the re-attach intent, then hand us the post-renum fd.
+ *
+ * stage1 loads firmware, uploads FX2, then drops the USB handle so
+ * Android's UsbDeviceConnection can be cleanly closed on the Java side.
+ * stage2 wraps the new fd and runs the remaining ADC/FPGA init.
+ *
+ * The libusb context survives between stages; only the per-device
+ * handle is recycled. */
+ps_status_t ps2204a_open_fd_stage1(ps2204a_device_t **out, int usb_fd)
+{
+    if (!out) return PS_ERROR_PARAM;
+
+    ps2204a_device_t *dev = (ps2204a_device_t *)calloc(1, sizeof(*dev));
+    if (!dev) return PS_ERROR_ALLOC;
+
+    pthread_mutex_init(&dev->stream_mutex, NULL);
+
+    ps_status_t fw_st = load_firmware(dev);
+    if (fw_st != PS_OK) {
+        pthread_mutex_destroy(&dev->stream_mutex);
+        free(dev);
+        return fw_st;
+    }
+
+#ifdef __ANDROID__
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+#endif
+
+    int r = libusb_init(&dev->ctx);
+    if (r < 0) {
+        free_firmware(dev);
+        pthread_mutex_destroy(&dev->stream_mutex);
+        free(dev);
+        return PS_ERROR_USB;
+    }
+    dev->owns_ctx = true;
+
+    r = libusb_wrap_sys_device(dev->ctx, (intptr_t)usb_fd, &dev->handle);
+    if (r < 0 || !dev->handle) {
+        libusb_exit(dev->ctx);
+        free_firmware(dev);
+        pthread_mutex_destroy(&dev->stream_mutex);
+        free(dev);
+        return PS_ERROR_USB;
+    }
+
+    r = libusb_claim_interface(dev->handle, 0);
+    if (r < 0) {
+        libusb_close(dev->handle);
+        libusb_exit(dev->ctx);
+        free_firmware(dev);
+        pthread_mutex_destroy(&dev->stream_mutex);
+        free(dev);
+        return PS_ERROR_USB;
+    }
+
+    /* Upload FX2; after this the device will disappear from the bus and
+     * come back with a new USB address. */
+    ps_status_t st = upload_fx2(dev);
+    if (st != PS_OK) {
+        libusb_release_interface(dev->handle, 0);
+        libusb_close(dev->handle);
+        libusb_exit(dev->ctx);
+        free_firmware(dev);
+        pthread_mutex_destroy(&dev->stream_mutex);
+        free(dev);
+        return st;
+    }
+
+    /* Drop the old handle so the Java side can close its
+     * UsbDeviceConnection without fighting us for the interface. */
+    libusb_release_interface(dev->handle, 0);
+    libusb_close(dev->handle);
+    dev->handle = NULL;
+
+    *out = dev;
+    return PS_OK;
+}
+
+ps_status_t ps2204a_open_fd_stage2(ps2204a_device_t *dev, int new_usb_fd)
+{
+    if (!dev || !dev->ctx) return PS_ERROR_PARAM;
+    if (dev->handle) return PS_ERROR_STATE;
+
+    int r = libusb_wrap_sys_device(dev->ctx, (intptr_t)new_usb_fd,
+                                   &dev->handle);
+    if (r < 0 || !dev->handle) return PS_ERROR_USB;
+
+    r = libusb_claim_interface(dev->handle, 0);
+    if (r < 0) {
+        libusb_close(dev->handle);
+        dev->handle = NULL;
+        return PS_ERROR_USB;
+    }
+
+    return do_open_post_reenum(dev);
 }
 
 void ps2204a_close(ps2204a_device_t *dev)
@@ -3567,6 +3761,10 @@ ps_status_t ps2204a_set_siggen(ps2204a_device_t *dev, ps_wave_t type,
      * the field name is kept for source compatibility with earlier versions. */
     dev->siggen_freq_param = freq_param;
     dev->siggen_wave = (uint8_t)(type & 0xFF);
+    dev->siggen_pkpk_uv = pkpk_uv;
+    /* Arm the SDK-streaming 3rd-phase siggen injection. Cleared only when
+     * a disable call is made (set_siggen with DC + freq=0). */
+    dev->siggen_configured = !(type == PS_WAVE_DC && freq_param == 0);
 
     /* 1. Control packet on EP 0x01 (compound: 85 04 9b + 85 21 8c + trailers). */
     /* The waveform upload on EP 0x06 MUST be submitted asynchronously
@@ -3632,9 +3830,13 @@ ps_status_t ps2204a_set_siggen(ps2204a_device_t *dev, ps_wave_t type,
                               (uint8_t *)get_data, CMD_SIZE,
                               wf_callback, &get_ctx, 5000);
 
-    libusb_submit_transfer(xfer_cmd);
-    libusb_submit_transfer(xfer_lut);
-    libusb_submit_transfer(xfer_get);
+    int sc = libusb_submit_transfer(xfer_cmd);
+    int sl = libusb_submit_transfer(xfer_lut);
+    int sg = libusb_submit_transfer(xfer_get);
+    if (sc || sl || sg) {
+        PS_LOG("set_siggen submit rc cmd=%d lut=%d get=%d (streaming=%d)",
+               sc, sl, sg, (int)dev->streaming);
+    }
 
     /* Wait for all three transfers to complete. */
     struct timeval tv = {3, 0};
@@ -3644,12 +3846,17 @@ ps_status_t ps2204a_set_siggen(ps2204a_device_t *dev, ps_wave_t type,
 
     bool cmd_ok = cmd_ctx.success;
     bool upload_ok = lut_ctx.success;
+    bool get_ok = get_ctx.success;
 
     libusb_free_transfer(xfer_cmd);
     libusb_free_transfer(xfer_lut);
     libusb_free_transfer(xfer_get);
 
-    if (!cmd_ok || !upload_ok) return PS_ERROR_USB;
+    if (!cmd_ok || !upload_ok) {
+        PS_LOG("set_siggen transfer status cmd_ok=%d upload_ok=%d get_ok=%d streaming=%d",
+               (int)cmd_ok, (int)upload_ok, (int)get_ok, (int)dev->streaming);
+        return PS_ERROR_USB;
+    }
 
     usleep(50000);
     return PS_OK;
@@ -3670,6 +3877,11 @@ ps_status_t ps2204a_set_siggen_raw(ps2204a_device_t *dev, ps_wave_t type,
 
     dev->siggen_freq_param = freq_param;
     dev->siggen_wave = (uint8_t)(type & 0xFF);
+    dev->siggen_pkpk_uv = pkpk_uv;
+    /* A plain disable (set_siggen with DC+freq=0) clears the flag so the
+     * SDK setup falls back to stream_lut.bin. Anything else means the user
+     * wants output → let the SDK stream pick it up on next start. */
+    dev->siggen_configured = !(type == PS_WAVE_DC && freq_param == 0);
 
     libusb_clear_halt(dev->handle, EP_FW_OUT);
     uint8_t drain[CMD_SIZE];

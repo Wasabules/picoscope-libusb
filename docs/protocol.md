@@ -210,10 +210,31 @@ The `85 0c 86` opcode the early drivers used was a dead end — it
 computes a 8192-byte LUT on the host and uploads it on EP `0x06`.
 Frequency is programmed via `freq_param = int(freq_hz * 0x400)`.
 
-> Amplitude and offset bytes are mapped in the LUT code path, but on the
-> reference unit the output is stuck at ~13.5 Vpp / +7.24 V regardless
-> of commanded values — the upload path silently has no effect on
-> amplitude. Treat as unresolved.
+### Siggen + `SDK` streaming — 3rd-phase LUT injection
+
+The `SDK` streaming setup emits two identical `85 04 9b + 85 21 8c`
+primer packets each followed by a **DC** LUT (all samples = `0x07ee`,
+2030). Those two primers initialise the FPGA's DDS pacing and leave the
+DAC loaded with DC — so a naïve replay of `SDK` streaming keeps the
+generator silent even when the user has configured a waveform.
+
+To keep the DAC alive, the driver injects a **third** `85 04 9b +
+85 21 8c` packet carrying the user's frequency, followed by the user's
+waveform LUT and a `BUFTYPE1` commit, **between the TB/gain packet and
+`cmd1`**:
+
+```
+… → TB_GAIN (85 07 97 …)
+    → 9B_USER (85 04 9b + 85 21 8c, user freq_param)
+    → user LUT (8192 bytes on EP 0x06)
+    → BUFTYPE1 commit
+    → cmd1 (streaming flag 0x41)
+    → cmd2 → trigger
+```
+
+Block capture and `FAST` streaming do not need this phase — the DAC is
+programmed once by `ps2204a_set_siggen` and remains live across block
+captures.
 
 ## Calibration
 
