@@ -19,10 +19,28 @@ frontend, statically linked against `../driver/libpicoscope2204a.a`.
 
 ```bash
 # Live development (Vite HMR on the frontend, Go rebuilds on change)
-wails dev -tags webkit2_41
+make dev
 
 # Production — single self-contained binary at build/bin/picoscope-gui
-wails build -tags webkit2_41
+make build
+
+# Sanity check: confirm the binary is linked against the *current* .a
+make verify
+```
+
+`make build` rebuilds the driver first, then runs `go clean -cache`,
+`touch main.go`, and `wails build -clean`. The extra dance exists
+because cgo only invalidates its artefact cache when `.h` or `.go`
+files change — a rebuilt `libpicoscope2204a.a` with identical headers
+gets silently ignored, and a stale `.a` gets relinked. `make verify`
+greps the resulting binary for a driver symbol to make sure the relink
+actually happened.
+
+If you prefer raw commands, the equivalent is:
+
+```bash
+(cd ../driver && make)
+go clean -cache && touch main.go && wails build -tags webkit2_41 -clean
 ```
 
 ## USB access

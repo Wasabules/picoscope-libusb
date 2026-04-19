@@ -19,51 +19,70 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.Wasabules:picoscope-libusb:v0.1.0")
+    implementation("com.github.Wasabules:picoscope-libusb:v0.1.9")
 }
 ```
 
 JitPack pulls the tagged commit, runs the build defined in
-`jitpack.yml`, and serves the resulting AAR. Your app code then just:
-
-```kotlin
-import io.github.wasabules.ps2204.PicoScope2204A
-
-val device = usbManager.deviceList.values.first {
-    it.vendorId == 0x0CE9 && it.productId == 0x1007
-}
-usbManager.requestPermission(device, pendingIntent)
-
-// After the permission broadcast:
-val connection = usbManager.openDevice(device)
-val handle = PicoScope2204A.nativeOpen(connection.fileDescriptor)
-
-PicoScope2204A.nativeSetChannel(handle,
-    PicoScope2204A.CHANNEL_A, true,
-    PicoScope2204A.DC, PicoScope2204A.RANGE_5V)
-PicoScope2204A.nativeSetTimebase(handle, 5, 1000)
-val samples: FloatArray? = PicoScope2204A.nativeCaptureBlock(handle, 1000)
-
-PicoScope2204A.nativeClose(handle)
-```
+`jitpack.yml`, and serves the resulting AAR. The Java API mirrors the
+C driver — see [`PicoScope2204A.java`](../android-lib/src/main/java/io/github/wasabules/ps2204/PicoScope2204A.java)
+for the full surface (block + dual-channel capture, all three streaming
+modes, triggers, range calibration, signal generator).
 
 Note the package: `io.github.wasabules.ps2204` — deliberately neutral
 so there is no namespace collision or trademark claim with
 `com.picotech` / `com.picoscope` packages.
 
-## USB permission + open flow
+## USB permission + open flow (two-phase)
 
 Android does not expose raw `libusb_open()` — apps must go through
-`UsbManager` to get a file descriptor. The JNI layer has a dedicated
-entry point `nativeOpen(fd)` that calls the driver's
-`ps2204a_open_with_fd()`. Typical flow:
+`UsbManager` for a file descriptor. And because the FX2 firmware upload
+re-enumerates the device, the original fd gets invalidated mid-open,
+and the Android sandbox forbids scanning `/dev/bus/usb` to find the
+post-renum device. The library handles this with a **two-phase open**
+driven by the app:
 
-1. Find the `UsbDevice` matching VID `0x0CE9` / PID `0x1007`.
-2. `usbManager.requestPermission()` and wait for the broadcast.
-3. `usbManager.openDevice(device)` → `UsbDeviceConnection`.
-4. Pass `connection.fileDescriptor` to `PicoScope2204A.nativeOpen()`.
-5. Do the firmware upload + FPGA init **on a background thread** — it
-   takes ~2 s and must not run on the UI thread.
+```kotlin
+import io.github.wasabules.ps2204.PicoScope2204A
+
+// --- Stage 1 -------------------------------------------------------
+val device = usbManager.deviceList.values.first {
+    it.vendorId == 0x0CE9 && it.productId == 0x1007
+}
+usbManager.requestPermission(device, pendingIntent)
+// after the permission broadcast fires:
+val conn1 = usbManager.openDevice(device)
+val handle = PicoScope2204A.nativeOpenStage1(conn1.fileDescriptor)
+conn1.close()       // Android emits USB_DEVICE_DETACHED → ATTACHED
+
+// --- Wait for the re-attach broadcast, then: ----------------------
+val device2 = /* the newly-attached UsbDevice (same VID/PID) */
+usbManager.requestPermission(device2, pendingIntent)
+val conn2 = usbManager.openDevice(device2)
+val rc = PicoScope2204A.nativeOpenStage2(handle, conn2.fileDescriptor)
+if (rc != 0) {
+    PicoScope2204A.nativeClose(handle)   // still needed on failure
+    throw IOException("stage2 failed: $rc")
+}
+
+// --- Device fully ready -------------------------------------------
+PicoScope2204A.nativeSetChannel(handle,
+    PicoScope2204A.CHANNEL_A, true,
+    PicoScope2204A.DC, PicoScope2204A.RANGE_5V)
+PicoScope2204A.nativeSetTimebase(handle, 5, 1000)
+val samples = PicoScope2204A.nativeCaptureBlock(handle, 1000)
+
+PicoScope2204A.nativeClose(handle)
+```
+
+Run stage 1 **on a background thread** — the FX2 upload takes ~1 s.
+Stage 2 is fast (ADC init + FPGA bitstream + ~200 ms of waveform LUT
+upload) but should also stay off the UI thread.
+
+`nativeOpen(fd)` still exists for environments that don't trigger
+re-enumeration (e.g. a device already in post-firmware state), but new
+code should use the two-phase flow — it's the only reliable path from
+a cold plug.
 
 In your app's `AndroidManifest.xml`:
 
@@ -111,19 +130,13 @@ Recommended UX:
    `nativeOpen()` (simplest) or patch `find_firmware_dir()` in
    `picoscope2204a.c` to check `getFilesDir()` directly.
 
-## Re-enumeration caveat
+## 16 KB page-size alignment (Android 15+)
 
-After the FX2 firmware upload the device disappears from the USB bus
-for ~1 s and reappears with a new address. On Linux `libusb` handles
-this transparently; on Android the `UsbDevice` object that produced
-your original permission grant becomes stale, so the FD you held is
-also stale.
-
-The C driver does the re-find internally using the
-`libusb_device_handle` it already has, so from the app's perspective
-`nativeOpen()` returns only when the device is fully ready. If you
-cached the `UsbDevice` on the Kotlin side (unusual), refresh it from
-`usbManager.deviceList` after `nativeOpen()` returns.
+Pixel 8/9 and certain tablets ship Android 15 with a 16 KB memory page
+size. Any shared library loaded on those devices must be linked with
+`-Wl,-z,max-page-size=16384` — we already pass this for `libpicoscope_jni.so`
+in `android-lib/src/main/cpp/CMakeLists.txt`, so consumers don't have
+to do anything. If you re-link the JNI shim manually, keep the flag.
 
 ## Building the library locally
 
@@ -148,7 +161,9 @@ emulator images.
 | `-12` (`LIBUSB_ERROR_NOT_SUPPORTED`) | `usbfs_capabilities` disabled            | Requires root or a recent kernel (≥5.2)   |
 | Status `0x7b` on every call          | Previous session left state              | Always re-upload FX2 on `nativeOpen`      |
 | `libusb_submit_transfer` EIO         | App lost focus → Android detached USB    | Re-request permission, re-open            |
-| UI hangs ~2 s on first capture       | Firmware upload blocks `nativeOpen`      | Run `nativeOpen` off the UI thread        |
+| UI hangs ~2 s on first capture       | Firmware upload blocks `nativeOpenStage1`| Run stage 1 off the UI thread             |
+| `stage2 failed: -1` after replug     | Passed the stage-1 fd again (stale)      | Use the fd from the **post-renum** `UsbDeviceConnection` |
+| `dlopen` rejects `libpicoscope_jni`  | Target device uses 16 KB pages           | Rebuild with `-Wl,-z,max-page-size=16384` (default in this module) |
 
 See [`protocol.md`](protocol.md) for the wire-level USB protocol — it
 is identical between the Linux and Android builds.
