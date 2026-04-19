@@ -403,31 +403,58 @@
     } catch (e) { showError(String(e)); }
   }
 
-  // Signal generator
+  // Signal generator — the 8192-byte siggen LUT goes out on EP 0x06, which
+  // the streaming pipeline also uses. Always stop → apply → restart; the
+  // SDK setup in the driver picks up the configured siggen state and
+  // re-programs the DAC after its own stream_lut prime, so siggen + SDK
+  // 1 MS/s streaming coexist. In FAST mode the restart doesn't touch
+  // EP 0x06, so the siggen LUT from the apply survives as-is.
+  async function withStreamingPaused(fn) {
+    const wasStreaming = isStreaming;
+    if (wasStreaming) {
+      await StopStreaming();
+      isStreaming = false;
+    }
+    try {
+      await fn();
+    } finally {
+      if (wasStreaming) {
+        try {
+          await StartStreamingMode(streamMode);
+          isStreaming = true;
+        } catch (e) { showError('Stream restart failed: ' + e); }
+      }
+    }
+  }
+
   async function handleSiggenOn() {
     if (!connected) return;
     try {
-      const usingExtras = siggenSweep || siggenOffsetMv !== 0
-                          || (siggenWave === 'square' && siggenDuty !== 50);
-      if (usingExtras) {
-        const start = siggenFreq;
-        const stop  = siggenSweep ? siggenStopFreq : siggenFreq;
-        const inc   = siggenSweep ? siggenSweepInc : 0;
-        const dwell = siggenSweep ? siggenSweepDwell : 0;
-        await SetSiggenEx(siggenWave, start, stop, inc, dwell,
-                          siggenAmpMv, siggenOffsetMv, siggenDuty);
-      } else {
-        await SetSiggen(siggenWave, siggenFreq, siggenAmpMv);
-      }
-      siggenEnabled = true;
+      await withStreamingPaused(async () => {
+        const usingExtras = siggenSweep || siggenOffsetMv !== 0
+                            || (siggenWave === 'square' && siggenDuty !== 50);
+        if (usingExtras) {
+          const start = siggenFreq;
+          const stop  = siggenSweep ? siggenStopFreq : siggenFreq;
+          const inc   = siggenSweep ? siggenSweepInc : 0;
+          const dwell = siggenSweep ? siggenSweepDwell : 0;
+          await SetSiggenEx(siggenWave, start, stop, inc, dwell,
+                            siggenAmpMv, siggenOffsetMv, siggenDuty);
+        } else {
+          await SetSiggen(siggenWave, siggenFreq, siggenAmpMv);
+        }
+        siggenEnabled = true;
+      });
     } catch (e) { showError(String(e)); }
   }
 
   async function handleSiggenOff() {
     if (!connected) return;
     try {
-      await DisableSiggen();
-      siggenEnabled = false;
+      await withStreamingPaused(async () => {
+        await DisableSiggen();
+        siggenEnabled = false;
+      });
     } catch (e) { showError(String(e)); }
   }
 
