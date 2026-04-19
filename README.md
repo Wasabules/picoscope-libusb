@@ -72,7 +72,8 @@ minor tweaks — untested.
 | Block capture (single / dual channel) | ✅ |
 | Fast block streaming (~330 kS/s) | ✅ |
 | Native streaming (~100 S/s, DC monitoring) | ✅ |
-| SDK-style continuous streaming (1 MS/s, gap-free) | ✅ |
+| SDK-style continuous streaming (gap-free, 500 ns..1 ms/sample, 1 MS/s default) | ✅ |
+| SDK streaming: client-side auto-stop (`set_sdk_stream_auto_stop`) | ✅ |
 | Trigger: edge / window / PWQ | ✅ |
 | Trigger: ETS (equivalent-time sampling) | ✅ |
 | Enhanced resolution (up to 12-bit via oversampling) | ✅ |

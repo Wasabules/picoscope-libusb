@@ -73,7 +73,15 @@ If you prefer the CLI flow, see `tools/firmware-extractor/` or
 - Three streaming modes, selectable at runtime:
   - **Fast block** (~330 kS/s) — rapid back-to-back blocks, small gaps
   - **Native** (~100 S/s) — FPGA native mode, DC monitoring
-  - **SDK** (1 MS/s, gap-free) — SDK-protocol replay, right mode for decode
+  - **SDK** (1 MS/s default, 2 MS/s → 1 kS/s tunable, gap-free) —
+    SDK-protocol replay; right mode for decode. Tunables:
+    - `SetSdkStreamIntervalNs(ns)` — per-sample interval 500 ns..1 ms
+      (multiples of 10); 0 restores the 1 µs default.
+    - `SetSdkStreamAutoStop(maxSamples)` — client-side sample cap; the
+      stream stops cleanly once the ring has accumulated `maxSamples`
+      entries (overshoot ≤ ~8 k = async-pool depth).
+    - Call both BEFORE `StartStreamingMode("sdk")` — cmd1 is frozen at
+      stream start.
 - Timebase 0–23 (10 ns → ~90 ms/sample), 9 voltage ranges (50 mV – 20 V)
 - AC/DC coupling per channel
 - Enhanced resolution (up to 12-bit via on-driver oversampling)

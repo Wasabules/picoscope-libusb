@@ -376,3 +376,40 @@ func (a *App) GetStreamingMode() string {
 	}
 	return streamModeName(a.streamMode)
 }
+
+// SetSdkStreamIntervalNs tunes the per-sample interval for PS_STREAM_SDK.
+// interval_ns=0 restores the 1 µs / 1 MS/s default. Valid non-zero values
+// are 500 ns .. 1 ms in 10 ns increments. Must be called BEFORE
+// StartStreamingMode("sdk") — the driver reads this at stream start and
+// freezes the cmd1 template; later changes take effect on the next start.
+func (a *App) SetSdkStreamIntervalNs(intervalNs uint32) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.connected {
+		return fmt.Errorf("not connected")
+	}
+	st := C.wrap_set_sdk_stream_interval_ns(a.dev, C.uint(intervalNs))
+	if st != 0 {
+		return fmt.Errorf("set_sdk_stream_interval_ns failed (status=%d, ns=%d)",
+			int(st), intervalNs)
+	}
+	return nil
+}
+
+// SetSdkStreamAutoStop enables the SDK-style client-side sample cap for
+// PS_STREAM_SDK. maxSamples=0 disables auto-stop (free-running). When
+// armed and the accumulated sample count reaches maxSamples, the driver
+// stops the stream cleanly within one async-pool drain.
+func (a *App) SetSdkStreamAutoStop(maxSamples uint64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.connected {
+		return fmt.Errorf("not connected")
+	}
+	st := C.wrap_set_sdk_stream_auto_stop(a.dev, C.ulonglong(maxSamples))
+	if st != 0 {
+		return fmt.Errorf("set_sdk_stream_auto_stop failed (status=%d, max=%d)",
+			int(st), maxSamples)
+	}
+	return nil
+}

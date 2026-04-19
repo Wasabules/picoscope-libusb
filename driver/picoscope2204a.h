@@ -302,6 +302,48 @@ ps_status_t ps2204a_get_streaming_stats(ps2204a_device_t *dev,
 /* Check if streaming is active. */
 bool ps2204a_is_streaming(ps2204a_device_t *dev);
 
+/* --- SDK continuous streaming (PS_STREAM_SDK) tuning ----------------------
+ *
+ * PS_STREAM_SDK replays the proprietary SDK's USB protocol to achieve
+ * gap-free dual-channel capture. The two setters below tune the capture
+ * parameters the SDK exposes.
+ *
+ * Call them AFTER open but BEFORE ps2204a_start_streaming_mode(PS_STREAM_SDK).
+ * Mid-stream changes are ignored (cmd1 is baked into the streaming thread
+ * at start time).
+ */
+
+/* Per-sample interval in nanoseconds.
+ *   500       → 500 ns (2 MS/s)
+ *   1000      → 1 µs   (1 MS/s, default)
+ *   10000     → 10 µs  (100 kS/s)
+ *   1000000   → 1 ms   (1 kS/s)
+ *   0         → reset to default (1 µs)
+ *
+ * Accepted range: 500 ns .. 1 ms in steps of 10 ns (the device quantum).
+ * Values outside that range return PS_ERROR_INVALID.
+ *
+ * Hardware-validated 500 ns → 1 ms, 2026-04-19. Slower rates work but each
+ * chunk requires (8192 × interval_ns) wall time to flush, so consumers
+ * should expect block latency = interval_ns × 8.192 ms.
+ */
+ps_status_t ps2204a_set_sdk_stream_interval_ns(ps2204a_device_t *dev,
+                                               uint32_t interval_ns);
+
+/* Automatic stop after N samples delivered.
+ *   0             → disabled (free-running, the default)
+ *   N (>0)        → stream stops once stream_samples_total ≥ N; the thread
+ *                   exits cleanly and ps2204a_is_streaming() returns false.
+ *
+ * Actual stop point overshoots by ≤ the async transfer pool size
+ * (≈ 32 KB / 4 = 8 k samples worst case, 0.8 % at 1 M samples).
+ *
+ * Client-side implementation (matches the SDK's behaviour — the device
+ * itself has no auto_stop opcode).
+ */
+ps_status_t ps2204a_set_sdk_stream_auto_stop(ps2204a_device_t *dev,
+                                             uint64_t max_samples);
+
 /* ========================================================================
  * Signal Generator
  * ======================================================================== */

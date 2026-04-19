@@ -26,6 +26,20 @@ usb_trace.log
 usb_strace.log
 sdk_strace.log
 trace_*.log
+# SDK-stream-trace raw captures (LD_PRELOAD output of the proprietary SDK)
+tools/sdk-stream-trace/*.log
+tools/sdk-stream-trace/*.stdout
+tools/sdk-stream-trace/sdk_param_phase_table.txt
+
+# ============================================================================
+# SDK-stream-trace ELF binaries (rebuilt locally from the *.c sources)
+# ============================================================================
+tools/sdk-stream-trace/experiments
+tools/sdk-stream-trace/sdk_autostop_matrix
+tools/sdk-stream-trace/sdk_open_only
+tools/sdk-stream-trace/sdk_stream_trace
+tools/sdk-stream-trace/sdk_stream_param
+tools/sdk-stream-trace/our_stream_trace
 
 # ============================================================================
 # Build artefacts

@@ -58,6 +58,13 @@ static unsigned long long d_stream_total(ps2204a_device_t *dev) {
     if (ps2204a_get_streaming_stats(dev, &s) != PS_OK) return 0;
     return (unsigned long long)s.total_samples;
 }
+static ps_status_t d_set_sdk_interval_ns(ps2204a_device_t *dev, unsigned int ns) {
+    return ps2204a_set_sdk_stream_interval_ns(dev, (uint32_t)ns);
+}
+static ps_status_t d_set_sdk_auto_stop(ps2204a_device_t *dev,
+                                       unsigned long long max_samples) {
+    return ps2204a_set_sdk_stream_auto_stop(dev, (uint64_t)max_samples);
+}
 */
 import "C"
 
@@ -109,6 +116,10 @@ func main() {
 		sendAfter = flag.Duration("send-after", 500*time.Millisecond,
 			"delay before starting the UART sender")
 		mode = flag.Int("mode", 0, "0=fast, 1=native, 2=sdk (gap-free 1 MS/s)")
+		sdkIntervalNs = flag.Int("sdk-interval-ns", 0,
+			"SDK-mode per-sample interval in ns (0=1 µs default, 500..1000000, multiples of 10)")
+		sdkMaxSamples = flag.Int64("sdk-max-samples", 0,
+			"SDK-mode client-side auto-stop cap (0=free-running)")
 	)
 	flag.Parse()
 
@@ -149,6 +160,20 @@ func main() {
 	ring := 1 << 20
 	if *mode == 2 { // SDK streaming at 1 MS/s needs a bigger ring
 		ring = 1 << 22 // 4M samples ≈ 4 s of history
+		if *sdkIntervalNs != 0 {
+			if st := C.d_set_sdk_interval_ns(dev, C.uint(*sdkIntervalNs)); st != 0 {
+				log.Fatalf("set_sdk_stream_interval_ns(%d): status=%d",
+					*sdkIntervalNs, int(st))
+			}
+			log.Printf("[diag] sdk interval set to %d ns", *sdkIntervalNs)
+		}
+		if *sdkMaxSamples != 0 {
+			if st := C.d_set_sdk_auto_stop(dev, C.ulonglong(*sdkMaxSamples)); st != 0 {
+				log.Fatalf("set_sdk_stream_auto_stop(%d): status=%d",
+					*sdkMaxSamples, int(st))
+			}
+			log.Printf("[diag] sdk auto-stop armed at %d samples", *sdkMaxSamples)
+		}
 	}
 	if st := C.d_start_stream(dev, C.int(*mode), 1, C.int(ring)); st != 0 {
 		log.Fatalf("start_streaming: status=%d", int(st))

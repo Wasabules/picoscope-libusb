@@ -136,4 +136,14 @@ static inline int wrap_max_samples(ps2204a_device_t *dev) {
     return ps2204a_max_samples(dev);
 }
 
+static inline ps_status_t wrap_set_sdk_stream_interval_ns(ps2204a_device_t *dev,
+                                                           unsigned int interval_ns) {
+    return ps2204a_set_sdk_stream_interval_ns(dev, (uint32_t)interval_ns);
+}
+
+static inline ps_status_t wrap_set_sdk_stream_auto_stop(ps2204a_device_t *dev,
+                                                         unsigned long long max_samples) {
+    return ps2204a_set_sdk_stream_auto_stop(dev, (uint64_t)max_samples);
+}
+
 #endif // PS_CGO_WRAPPERS_H

@@ -64,21 +64,34 @@ Ordering matters — skipping steps leaves the device in status `0x7b`
 
 ## Capture setup (`cmd1` compound packet)
 
-The block-capture setup is one `0x02` packet containing these
-sub-commands in order:
+The capture setup is one `0x02` packet containing these sub-commands
+in order. **Several fields encode differently in block vs.
+streaming (SDK / native) mode** — see the per-row notes.
 
-| Sub-cmd        | Role              | Key bytes                                 |
-|----------------|-------------------|-------------------------------------------|
-| `85 08 85 ...` | sample count      | bytes 9–10 = 16-bit BE count              |
-| `85 08 93 ...` | channel config    | bytes 19–20 = timebase-dependent (below)  |
-| `85 08 89 ...` | buffer config     | bytes 29–30 = `2^timebase` BE, cap `FFFF` |
-| `85 05 82 ...` | get-data setup    | —                                         |
-| `85 04 9a ...` | timebase config   | always `00 00 00`                         |
-| `85 07 97 ...` | run block + gain  | bytes 50–52 = channel enables + PGA       |
-| `85 05 95 ...` | status config     | byte varies by trigger mode               |
+| Sub-cmd        | Role              | Key bytes                                                                     |
+|----------------|-------------------|-------------------------------------------------------------------------------|
+| `85 08 85 ...` | sample count      | **Block**: 16-bit BE at bytes 9–10 • **SDK/native**: 5-byte BE at bytes 6–10  |
+| `85 08 93 ...` | channel config    | **Block**: bytes 19–20 timebase-dependent lookup • **SDK/native**: `00 06`    |
+| `85 08 89 ...` | buffer / interval | **Block**: bytes 29–30 = `2^timebase` BE, cap `FFFF` • **SDK/native**: 3-byte BE at bytes 28–30 = `interval_ns / 10` |
+| `85 05 82 ...` | get-data / mode   | byte 37 = `0x01` block, `0x41` streaming                                      |
+| `85 04 9a ...` | timebase config   | always `00 00 00`                                                             |
+| `85 07 97 ...` | run block + gain  | bytes 50–52 = channel enables + PGA (same in all modes)                       |
+| `85 05 95 ...` | status config     | byte varies by trigger mode                                                   |
 
-Byte 37 of cmd1 selects the acquisition mode: `0x01` = block,
-`0x41` = native streaming.
+Notes on streaming encoding (verified April 2026 against 22 parametric
+`ps2000_run_streaming_ns` captures — see
+[`sdk-streaming-protocol.md`](./sdk-streaming-protocol.md)):
+
+- **Sample count in SDK/native is a 5-byte big-endian integer**
+  (e.g. 1 000 000 = `00 00 0f 42 40`). A 2-byte BE is enough for
+  block mode because `max_samples ≤ 8064` in that mode, but SDK
+  streaming accepts arbitrarily large counts.
+- **Channel config is `00 06` unconditionally in SDK/native mode** —
+  the timebase lookup below applies only to block mode.
+- **Buffer/interval field in SDK/native is literally
+  `interval_ns / 10`** (count of 10 ns FPGA ticks per sample), not
+  `2^timebase`. 500 ns → `00 00 32`; 1 µs → `00 00 64`;
+  10 µs → `00 03 e8`.
 
 ### Gain bytes in `85 07 97`
 
@@ -105,7 +118,7 @@ Byte 37 of cmd1 selects the acquisition mode: `0x01` = block,
 Bank 1 = high-sensitivity (100 mV – 2 V); bank 0 = low-sensitivity
 (50 mV, 5 V – 20 V).
 
-### Channel / buffer bytes per timebase (SDK-observed)
+### Channel / buffer bytes per timebase — **block mode only**
 
 ```
 tb=0  → chan=(0x27,0x2f)  buf=(0x00,0x01)
@@ -116,9 +129,13 @@ tb=5  → chan=(0x01,0x57)  buf=(0x00,0x20)
 tb=10 → chan=(0x00,0x28)  buf=(0x04,0x00)
 ```
 
-`buf` follows `2^tb` capped at `0xFFFF`. The driver clamps `tb ∈ [0, 10]`
-for streaming where the lookup is verified; block mode accepts up to
-`tb=23`.
+`buf` follows `2^tb` capped at `0xFFFF`. This lookup applies **only
+to block captures**. Block mode accepts `tb` up to 23.
+
+In SDK and native streaming modes the channel bytes are fixed at
+`00 06` and the buffer field carries `interval_ns / 10` as a 3-byte
+big-endian integer — see the cmd1 table above and
+[`sdk-streaming-protocol.md`](./sdk-streaming-protocol.md).
 
 ## Timebase formula
 

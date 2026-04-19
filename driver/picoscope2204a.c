@@ -218,6 +218,19 @@ struct ps2204a_device {
         uint8_t *stream_lut;  size_t stream_lut_len;   /* SDK streaming LUT */
         uint8_t *waveform;    size_t waveform_len;     /* Channel waveform table */
     } fw;
+
+    /* === SDK-streaming tunables ===
+     * Read by sdk_streaming_thread at start-of-stream. All zero-initialised
+     * on open, which gives the default behaviour:
+     *   - sample_interval 1 µs → ticks 100
+     *   - sample_count 10 000
+     *   - auto_stop disabled (free-running)
+     *
+     * Setters: ps2204a_set_sdk_stream_interval_ns() and
+     *          ps2204a_set_sdk_stream_auto_stop(). */
+    uint32_t sdk_interval_ticks;   /* 0 = default (100 = 1 µs). Each tick = 10 ns. */
+    uint64_t sdk_max_samples;      /* 0 = free-running (no auto_stop) */
+    uint8_t  sdk_auto_stop;        /* mirrors (sdk_max_samples > 0); kept for clarity */
 };
 
 /* ========================================================================
@@ -1954,11 +1967,12 @@ static const uint8_t SDK_SETUP_TB_GAIN[CMD_SIZE] = {
     0x02, 0x85, 0x04, 0x9a, 0x00, 0x00, 0x00, 0x85, 0x07, 0x97, 0x00, 0x14, 0x00, 0x3f, 0x04, 0x40
 };
 
-/* cmd2 captured from SDK trace 2026-04-19 with siggen active + 1 µs sample
- * interval. Bytes 7..14 appear to encode the streaming interval (prior dump
- * with a different interval had `80 53 da e2 45 63 00 00` here). */
+/* cmd2 captured from SDK trace 2026-04-19. Bytes 7..9 were host-side
+ * opaque counter values in the original SDK trace; hardware-validated
+ * as safe to zero (EXP4 2026-04-19 → byte-identical stream: 229 360
+ * samples, ~983 kS/s across 5×5 trials). Zeroed here for determinism. */
 static const uint8_t SDK_CMD2[CMD_SIZE] = {
-    0x02, 0x85, 0x0c, 0x86, 0x00, 0x40, 0x00, 0x90, 0xa7, 0xd2, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x85,
+    0x02, 0x85, 0x0c, 0x86, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x85,
     0x05, 0x87, 0x00, 0x08, 0x00, 0x00, 0x85, 0x0b, 0x90, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x85, 0x08, 0x8a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x03, 0x00,
     0x02, 0x02, 0x0c, 0x03, 0x0a, 0x00, 0x00, 0x85, 0x04, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -1978,9 +1992,34 @@ static void build_siggen_cmd(uint8_t *cmd, uint32_t freq_param,
                              uint32_t stop_param, uint32_t inc_param,
                              uint16_t dwell_samples);
 
-/* Build cmd1 for SDK streaming. Sample count is fixed at 10000 (as in trace),
- * buf bytes (0,0,100). Only the gain bytes vary with channel/range. */
-static void build_sdk_stream_cmd1(ps2204a_device_t *dev, uint8_t *cmd)
+/* Build cmd1 for SDK streaming.
+ *
+ * Byte-level layout verified 2026-04-19 from a parametric SDK cold-plug
+ * capture (docs/sdk-streaming-protocol.md):
+ *
+ *   - `85 08 85` sub-command: sample_count is 5-byte BE at cmd[6..10].
+ *     (This supersedes the block-mode "2-byte BE at bytes 9..10" claim
+ *     — in SDK mode max_samples may exceed 65 535, e.g. 1 000 000 =
+ *     `00 00 0f 42 40`.)
+ *   - `85 08 93` sub-command: channel-mode is hard-coded to `00 06`
+ *     in SDK/native mode (the block-mode timebase lookup does not
+ *     apply here).
+ *   - `85 08 89` sub-command: sample_interval as 3-byte BE count of
+ *     10 ns FPGA ticks, at cmd[28..30]. ticks = interval_ns / 10.
+ *     (Not `2^timebase`; that encoding is block-mode only.)
+ *
+ * Only the gain bytes (50..52) also vary with the channel/range
+ * configuration. All other bytes are fixed across every SDK streaming
+ * start observed on the wire.
+ *
+ * @param sample_count   value to emit into the 85 08 85 sub-command
+ *                       (clamped to 40-bit range on the 5-byte BE field)
+ * @param interval_ticks value to emit into the 85 08 89 sub-command
+ *                       (= sample_interval_ns / 10, clamped to 24 bits)
+ */
+static void build_sdk_stream_cmd1(ps2204a_device_t *dev, uint8_t *cmd,
+                                  uint64_t sample_count,
+                                  uint32_t interval_ticks)
 {
     uint8_t b50, b51, b52;
     encode_gain_bytes(dev, &b50, &b51, &b52);
@@ -1988,15 +2027,29 @@ static void build_sdk_stream_cmd1(ps2204a_device_t *dev, uint8_t *cmd)
     memset(cmd, 0, CMD_SIZE);
     const uint8_t tpl[] = {
         0x02,
-        0x85, 0x08, 0x85, 0x00, 0x20, 0x00, 0x00, 0x00, 0x27, 0x10,
+        0x85, 0x08, 0x85, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x85, 0x08, 0x93, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x06,
-        0x85, 0x08, 0x89, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x64,
+        0x85, 0x08, 0x89, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x85, 0x05, 0x82, 0x00, 0x08, 0x00, 0x41,
         0x85, 0x04, 0x9a, 0x00, 0x00, 0x00,
         0x85, 0x07, 0x97, 0x00, 0x14, 0x00, b50, b51, b52,
         0x85, 0x05, 0x95, 0x00, 0x08, 0x00, 0xff
     };
     memcpy(cmd, tpl, sizeof(tpl));
+
+    /* sample_count — 5-byte BE at cmd[6..10] (inside the 85 08 85 body). */
+    if (sample_count > 0xFFFFFFFFFFULL) sample_count = 0xFFFFFFFFFFULL;
+    cmd[6]  = (uint8_t)((sample_count >> 32) & 0xFF);
+    cmd[7]  = (uint8_t)((sample_count >> 24) & 0xFF);
+    cmd[8]  = (uint8_t)((sample_count >> 16) & 0xFF);
+    cmd[9]  = (uint8_t)((sample_count >>  8) & 0xFF);
+    cmd[10] = (uint8_t)( sample_count        & 0xFF);
+
+    /* interval_ticks — 3-byte BE at cmd[28..30] (inside 85 08 89 body). */
+    if (interval_ticks > 0xFFFFFF) interval_ticks = 0xFFFFFF;
+    cmd[28] = (uint8_t)((interval_ticks >> 16) & 0xFF);
+    cmd[29] = (uint8_t)((interval_ticks >>  8) & 0xFF);
+    cmd[30] = (uint8_t)( interval_ticks        & 0xFF);
 }
 
 /* Upload the 8192-byte streaming LUT on EP 0x06 synchronously. */
@@ -2009,9 +2062,29 @@ static int upload_stream_lut(ps2204a_device_t *dev)
                                 TIMEOUT_FW);
 }
 
-#define SDK_STREAM_XFER_SIZE    32768
 #define SDK_STREAM_POOL_SIZE    4
 #define SDK_STREAM_SKIP_BYTES   32   /* First-read framing header */
+
+/* FPGA commits EP 0x82 data in 16 384-byte blocks. Requesting transfers
+ * that aren't aligned to that boundary stalls the pipe at intermediate
+ * rates (observed: xfer=4k/10k/20k returned 0 samples for 50 µs/20 µs/10 µs
+ * respectively). We therefore fix the chunk size at 16 384 — half the
+ * old 32 KB — and only scale the libusb timeout. Empirically this
+ * unlocks clean capture down to 1 ms/sample. */
+#define SDK_STREAM_XFER_FIXED   16384
+
+static unsigned sdk_stream_timeout_for_ticks(uint32_t ticks)
+{
+    if (ticks == 0) ticks = 100;
+    /* Samples per chunk = SDK_STREAM_XFER_FIXED / 2 = 8192.
+     * Fill time (ms) = 8192 × ticks × 10 ns / 1e6 = ticks × 0.08192.
+     * Give ourselves 4× margin; clamp to [500 ms, 30 s]. */
+    unsigned long fill_ms = (unsigned long)ticks * 82UL / 1000UL;
+    unsigned long timeout = fill_ms * 4;
+    if (timeout < 500)   timeout = 500;
+    if (timeout > 30000) timeout = 30000;
+    return (unsigned)timeout;
+}
 
 typedef struct {
     ps2204a_device_t *dev;
@@ -2113,6 +2186,15 @@ static void LIBUSB_CALL sdk_stream_cb(struct libusb_transfer *xfer)
                        pairs, dev->stream_user);
     }
 
+    /* Client-side auto_stop: the SDK doesn't encode this in the device
+     * commands — it just stops polling once max_samples has been
+     * delivered. Mirror that here by clearing dev->streaming, which the
+     * outer event loop polls on every iteration. */
+    if (dev->sdk_auto_stop && dev->sdk_max_samples &&
+        dev->stream_samples_total >= dev->sdk_max_samples) {
+        dev->streaming = false;
+    }
+
 resubmit:
     if (dev->streaming && !st->fatal) {
         int r = libusb_submit_transfer(xfer);
@@ -2145,8 +2227,8 @@ static void *sdk_streaming_thread(void *arg)
     state.gain_a      = (ia >= 0 && ia < 9) ? dev->cal_gain[ia]      : 1.0f;
     state.gain_b      = (ib >= 0 && ib < 9) ? dev->cal_gain[ib]      : 1.0f;
 
-    state.tmp_a = (float *)malloc((SDK_STREAM_XFER_SIZE / 2) * sizeof(float));
-    state.tmp_b = (float *)malloc((SDK_STREAM_XFER_SIZE / 2) * sizeof(float));
+    state.tmp_a = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
+    state.tmp_b = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
     if (!state.tmp_a || !state.tmp_b) goto cleanup_mem;
 
     dev->stream_internal = &state;
@@ -2242,11 +2324,23 @@ static void *sdk_streaming_thread(void *arg)
     /* Give the FPGA a moment to stabilise after LUT uploads. */
     usleep(50000);
 
-    /* === Capture start: cmd1 + cmd2 + trigger === */
+    /* === Capture start: cmd1 + cmd2 + trigger ===
+     *
+     * sample_count/interval defaults mirror the 2026-04-19 trace
+     * baseline (10 000 samples, 100 ticks = 1 µs = 1 MS/s). Callers can
+     * override via ps2204a_set_sdk_stream_interval_ns() and
+     * ps2204a_set_sdk_stream_auto_stop(); zero-valued fields fall back
+     * to the default. auto_stop is handled client-side in sdk_stream_cb
+     * (the SDK does exactly this: it counts delivered samples and stops
+     * polling — the device sees identical commands in either case). */
+    uint32_t ticks   = dev->sdk_interval_ticks ? dev->sdk_interval_ticks : 100;
+    uint64_t samples = dev->sdk_max_samples    ? dev->sdk_max_samples    : 10000;
+
     uint8_t cmd1[CMD_SIZE];
-    build_sdk_stream_cmd1(dev, cmd1);
+    build_sdk_stream_cmd1(dev, cmd1, samples, ticks);
     if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
                              cmd1, CMD_SIZE, &transferred, 1000) < 0) goto cleanup;
+
     if (libusb_bulk_transfer(dev->handle, EP_CMD_OUT,
                              (uint8_t *)SDK_CMD2, CMD_SIZE,
                              &transferred, 1000) < 0) goto cleanup;
@@ -2259,17 +2353,19 @@ static void *sdk_streaming_thread(void *arg)
     dev->stream_samples_total = 0;
 
     /* === Async transfer pool on EP 0x82 === */
+    unsigned timeout_ms = sdk_stream_timeout_for_ticks(ticks);
+
     sdk_xfer_ctx_t pool[SDK_STREAM_POOL_SIZE] = {0};
     bool pool_ok = true;
     for (int i = 0; i < SDK_STREAM_POOL_SIZE; i++) {
         pool[i].dev = dev;
-        pool[i].buf = (uint8_t *)malloc(SDK_STREAM_XFER_SIZE);
+        pool[i].buf = (uint8_t *)malloc(SDK_STREAM_XFER_FIXED);
         pool[i].xfer = libusb_alloc_transfer(0);
         if (!pool[i].buf || !pool[i].xfer) { pool_ok = false; break; }
 
         libusb_fill_bulk_transfer(pool[i].xfer, dev->handle, EP_DATA_IN,
-                                  pool[i].buf, SDK_STREAM_XFER_SIZE,
-                                  sdk_stream_cb, &pool[i], 1000);
+                                  pool[i].buf, SDK_STREAM_XFER_FIXED,
+                                  sdk_stream_cb, &pool[i], timeout_ms);
         int r = libusb_submit_transfer(pool[i].xfer);
         if (r < 0) { pool_ok = false; break; }
         pool[i].in_flight = true;
@@ -3451,6 +3547,32 @@ ps_status_t ps2204a_start_streaming(ps2204a_device_t *dev,
                                         user_data, ring_size);
 }
 
+/* Public: set SDK-stream per-sample interval. 0 resets to default (1 µs).
+ * Accepts 500 ns → 1 ms in steps of 10 ns (the FPGA tick quantum). */
+ps_status_t ps2204a_set_sdk_stream_interval_ns(ps2204a_device_t *dev,
+                                               uint32_t interval_ns)
+{
+    if (!dev) return PS_ERROR_PARAM;
+    if (interval_ns == 0) {
+        dev->sdk_interval_ticks = 0;
+        return PS_OK;
+    }
+    if (interval_ns < 500 || interval_ns > 1000000) return PS_ERROR_PARAM;
+    if (interval_ns % 10 != 0)                      return PS_ERROR_PARAM;
+    dev->sdk_interval_ticks = interval_ns / 10;
+    return PS_OK;
+}
+
+/* Public: client-side auto_stop. 0 = free-running (default). */
+ps_status_t ps2204a_set_sdk_stream_auto_stop(ps2204a_device_t *dev,
+                                             uint64_t max_samples)
+{
+    if (!dev) return PS_ERROR_PARAM;
+    dev->sdk_max_samples = max_samples;
+    dev->sdk_auto_stop   = max_samples > 0 ? 1 : 0;
+    return PS_OK;
+}
+
 ps_status_t ps2204a_stop_streaming(ps2204a_device_t *dev)
 {
     if (!dev) return PS_ERROR_PARAM;
@@ -4066,7 +4188,10 @@ int ps2204a_get_streaming_dt_ns(const ps2204a_device_t *dev)
     if (!dev) return 0;
     if (!dev->streaming) return ps2204a_timebase_to_ns(dev->timebase);
     if (dev->stream_mode == PS_STREAM_NATIVE) return 10000000;
-    if (dev->stream_mode == PS_STREAM_SDK)    return 1000;  /* 1 MS/s */
+    if (dev->stream_mode == PS_STREAM_SDK) {
+        uint32_t ticks = dev->sdk_interval_ticks ? dev->sdk_interval_ticks : 100;
+        return (int)(ticks * 10); /* each tick = 10 ns FPGA cycle */
+    }
     return 1280;
 }
 
