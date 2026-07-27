@@ -115,15 +115,21 @@ def extract_ep06(pcap):
 def split_ep06(chunks):
     """Separate the FPGA bitstream from the 8 KiB channel LUT.
 
-    The scope uploads the FPGA as many large (>= 1 KiB) bulk OUTs, then one
-    8 KiB LUT per channel setup. Stream LUT and waveform LUT are the same
-    8 KiB blob on 2204A, so the first small one we see covers both."""
+    The scope uploads the FPGA bitstream first, as one contiguous run of
+    large bulk OUTs (32 KiB each plus a short tail), then one 8 KiB LUT per
+    channel setup. The SDK re-uploads that LUT on every set_channel, so a
+    long capture holds several copies — every 8 KiB transfer is LUT traffic,
+    not bitstream, and everything after the first one is past the end of the
+    bitstream. Stream LUT and waveform LUT are the same 8 KiB blob on the
+    2204A, so the first one covers both."""
     fpga = bytearray()
     lut = None
     for c in chunks:
-        if lut is None and len(c) == 8192:
-            lut = c
-        elif len(c) >= 1024:
+        if len(c) == 8192:
+            if lut is None:
+                lut = c
+            continue
+        if lut is None and len(c) >= 1024:
             fpga += c
     return bytes(fpga), lut
 
