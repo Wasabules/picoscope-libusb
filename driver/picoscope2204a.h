@@ -32,6 +32,9 @@ typedef enum {
     PS_DC = 1
 } ps_coupling_t;
 
+/* Number of supported voltage ranges (PS_50MV .. PS_20V). */
+#define PS2204A_NUM_RANGES 9
+
 /* Voltage ranges — values match PicoSDK ps2000 enum (R_50MV=2 .. R_20V=10).
  * PS2204A supports ranges 2-10 (50 mV to 20 V). */
 typedef enum {
@@ -295,6 +298,24 @@ ps_status_t ps2204a_get_streaming_latest(ps2204a_device_t *dev,
                                          float *buf_a, float *buf_b,
                                          int n, int *actual);
 
+/* Aggregated read: reduce the last `span` samples of the ring to `n_buckets`
+ * (min, max) pairs, the way the official SDK's aggregated streaming does.
+ *
+ * Plain decimation drops whatever falls between the samples it keeps, so a
+ * narrow glitch in a multi-second window simply disappears. Keeping both
+ * extremes of each bucket bounds the signal instead of sampling it, which is
+ * what a roll display needs once the window is longer than the pixel count.
+ *
+ * Any of the four output buffers may be NULL; each holds n_buckets floats.
+ * `span` is clamped to what the ring actually holds; pass 0 for everything
+ * available. `actual_buckets` receives the number of buckets written, which
+ * is less than n_buckets when there is not yet one sample per bucket. */
+ps_status_t ps2204a_get_streaming_aggregated(ps2204a_device_t *dev,
+                                             float *min_a, float *max_a,
+                                             float *min_b, float *max_b,
+                                             int n_buckets, int span,
+                                             int *actual_buckets);
+
 /* Get streaming statistics. */
 ps_status_t ps2204a_get_streaming_stats(ps2204a_device_t *dev,
                                         ps_stream_stats_t *stats);
@@ -412,6 +433,53 @@ ps_status_t ps2204a_get_range_calibration(ps2204a_device_t *dev,
 /* Auto-calibrate DC offset on the currently-enabled channels: assumes
  * their inputs are at 0 V and stores the measured mean as the offset. */
 ps_status_t ps2204a_calibrate_dc_offset(ps2204a_device_t *dev);
+
+/* Per-unit factory calibration, decoded from the device's own EEPROM.
+ *
+ * Each unit is trimmed at the factory and carries the result on board, so
+ * this is strictly better than any table compiled into the driver — those
+ * describe whichever device happened to be on the bench. It is read once at
+ * open() and applied by default; ps2204a_use_eeprom_calibration() switches
+ * back to the built-in fallback table for A/B comparison.
+ *
+ * Layout (reverse-engineered, see docs/protocol.md):
+ *   0x25  9 × int16 LE  DC offset, in 1/256 ADC code, expressed AFTER gain
+ *   0x6D  9 × int16 LE  channel A gain, Q14 (value / 16384)
+ *   0x7F  9 × int16 LE  channel B gain, Q14
+ * Both tables are indexed by (range − PS_50MV). */
+typedef struct {
+    bool  valid;                                  /* layout recognised */
+    float offset_mv[PS2204A_NUM_RANGES];          /* per range, both channels */
+    float gain[2][PS2204A_NUM_RANGES];            /* [channel][range] */
+} ps_cal_table_t;
+
+ps_status_t ps2204a_get_eeprom_calibration(ps2204a_device_t *dev,
+                                           ps_cal_table_t *out);
+/* Enable (default) or disable use of the EEPROM table. Disabling restores the
+ * built-in reference-unit constants. No-op if the EEPROM did not parse. */
+ps_status_t ps2204a_use_eeprom_calibration(ps2204a_device_t *dev, bool enable);
+bool ps2204a_eeprom_calibration_active(const ps2204a_device_t *dev);
+
+/* ========================================================================
+ * Overflow / clipping
+ * ========================================================================
+ * The driver clamps corrected samples to ±range so a gain > 1 cannot
+ * extrapolate past the screen rails. That clamp hides the difference between
+ * a signal sitting exactly at full scale and one driven beyond it, so the
+ * raw ADC codes are counted before scaling and reported here.
+ *
+ * Reflects the most recent block capture, or the most recent streaming block
+ * while streaming. */
+typedef struct {
+    uint32_t clipped_a;    /* samples at ADC code 0x00 or 0xFF */
+    uint32_t clipped_b;
+    uint32_t total;        /* samples examined per channel */
+    bool     overflow_a;   /* any clipped sample on the channel */
+    bool     overflow_b;
+} ps_overflow_t;
+
+ps_status_t ps2204a_get_last_overflow(ps2204a_device_t *dev,
+                                      ps_overflow_t *out);
 
 /* Raw EEPROM bytes (256: pages 0x00, 0x40, 0x80, 0xC0). Used for anyone
  * reversing the PicoTech factory calibration layout. */

@@ -227,8 +227,12 @@ struct ps2204a_device {
      * Populate manually via ps2204a_set_range_calibration() or let the
      * driver fit them automatically on ps2204a_calibrate_dc_offset(). */
     float cal_offset_mv[PS_RANGE_COUNT];
-    float cal_gain[PS_RANGE_COUNT];
+    float cal_gain[2][PS_RANGE_COUNT];   /* [channel][range] */
     uint8_t eeprom_raw[256];   /* 4 × 64-byte pages; read at open */
+    ps_cal_table_t eeprom_cal;           /* decoded from eeprom_raw */
+    ps_cal_table_t builtin_cal;          /* reference-unit fallback */
+    bool           using_eeprom_cal;
+    ps_overflow_t  last_overflow;
 
     /* Enhanced resolution: moving-average box filter with N = 4^extra_bits
      * taps. 0 = disabled (native 8-bit), up to 4 (12-bit effective). */
@@ -1317,6 +1321,76 @@ static void read_device_info(ps2204a_device_t *dev)
  * If the buffer is entirely zero, input is at mid-scale — the whole
  * buffer is valid.
  */
+/* ========================================================================
+ * Per-unit calibration from the device EEPROM
+ * ========================================================================
+ * Every unit is trimmed at the factory and carries the result on board. The
+ * table compiled into this driver describes one particular device that was on
+ * the bench; the EEPROM describes the device in the user's hand.
+ *
+ * Layout, recovered by correlating the stored words against a hand-measured
+ * table on the reference unit:
+ *   0x25  9 × int16 LE  DC offset, 1/256 ADC code, expressed AFTER gain
+ *   0x6D  9 × int16 LE  channel A gain, Q14
+ *   0x7F  9 × int16 LE  channel B gain, Q14
+ *
+ * Reconstructing the hand-measured offsets from these words alone lands
+ * within 1.1 % on average and 0.1 % on several ranges, which is inside the
+ * noise of the original measurements. */
+#define EE_OFFSET_BASE  0x25
+#define EE_GAIN_A_BASE  0x6D
+#define EE_GAIN_B_BASE  0x7F
+#define EE_Q14_ONE      16384.0f
+
+static int16_t ee_i16(const uint8_t *e, int off)
+{
+    return (int16_t)((uint16_t)e[off] | ((uint16_t)e[off + 1] << 8));
+}
+
+/* Decode the factory trim. `valid` is set only when every word lands in a
+ * plausible band: a wrong guess about the layout must fall back to the
+ * built-in table, never poison the measurements. */
+static void parse_eeprom_cal(ps2204a_device_t *dev)
+{
+    ps_cal_table_t *cal = &dev->eeprom_cal;
+    memset(cal, 0, sizeof(*cal));
+
+    const uint8_t *e = dev->eeprom_raw;
+    bool all_zero = true;
+    for (int i = 0; i < 256; i++) { if (e[i]) { all_zero = false; break; } }
+    if (all_zero) return;                    /* EEPROM read never answered */
+
+    for (int r = 0; r < PS_RANGE_COUNT; r++) {
+        float ga = (float)ee_i16(e, EE_GAIN_A_BASE + 2 * r) / EE_Q14_ONE;
+        float gb = (float)ee_i16(e, EE_GAIN_B_BASE + 2 * r) / EE_Q14_ONE;
+        int16_t off = ee_i16(e, EE_OFFSET_BASE + 2 * r);
+
+        /* The analog chain sits near 1.1 on this hardware; outside 0.5..2.0
+         * we are not looking at a gain table. The offset is a few ADC codes,
+         * so in 1/256 units it stays far below 8192. */
+        if (ga < 0.5f || ga > 2.0f || gb < 0.5f || gb > 2.0f) return;
+        if (off > 8192 || off < -8192) return;
+
+        float lsb_mv = (float)RANGE_MV[r] / ADC_HALF_RANGE;   /* mV per code */
+        /* Stored after gain, applied by us before it, hence the division.
+         * Channel A's gain is used for the shared offset; A and B differ by
+         * ~2.6 %, which on an offset of a few mV is far below one LSB. */
+        cal->offset_mv[r] = ((float)off / 256.0f) * lsb_mv / ga;
+        cal->gain[0][r] = ga;
+        cal->gain[1][r] = gb;
+    }
+    cal->valid = true;
+}
+
+static void apply_cal_table(ps2204a_device_t *dev, const ps_cal_table_t *cal)
+{
+    for (int r = 0; r < PS_RANGE_COUNT; r++) {
+        dev->cal_offset_mv[r] = cal->offset_mv[r];
+        dev->cal_gain[0][r]   = cal->gain[0][r];
+        dev->cal_gain[1][r]   = cal->gain[1][r];
+    }
+}
+
 static int find_valid_segment(const uint8_t *raw, int raw_len,
                               const uint8_t **out_ptr)
 {
@@ -1370,12 +1444,20 @@ static int find_valid_segment(const uint8_t *raw, int raw_len,
 }
 
 /* Scale [start..start+n] uint8 samples into mV float array. */
-static void scale_samples(const uint8_t *src, int n, float range_mv, float *out)
+static void scale_samples(const uint8_t *src, int n, float range_mv, float *out,
+                          uint32_t *clipped)
 {
     float scale = range_mv / ADC_HALF_RANGE;
+    uint32_t c = 0;
     for (int i = 0; i < n; i++) {
-        out[i] = ((float)src[i] - ADC_CENTER) * scale;
+        uint8_t v = src[i];
+        /* Count the rails before scaling: the caller clamps corrected values
+         * to +-range, which erases the difference between a signal sitting at
+         * full scale and one driven past it. */
+        if (v == 0x00 || v == 0xFF) c++;
+        out[i] = ((float)v - ADC_CENTER) * scale;
     }
+    if (clipped) *clipped = c;
 }
 
 /* Single-channel parse: take the last n_samples from the valid segment. */
@@ -1385,7 +1467,7 @@ static void scale_samples(const uint8_t *src, int n, float range_mv, float *out)
  * delay_pct = 0 the trigger sits at the middle of the returned data. */
 static int parse_waveform_ex(const uint8_t *raw, int raw_len, int n_samples,
                              int post_captured, int delay_pct,
-                             float range_mv, float *out)
+                             float range_mv, float *out, uint32_t *clipped)
 {
     const uint8_t *valid;
     int valid_len = find_valid_segment(raw, raw_len, &valid);
@@ -1410,16 +1492,16 @@ static int parse_waveform_ex(const uint8_t *raw, int raw_len, int n_samples,
     if (start < 0) start = 0;
 
     int copy_len = n_samples < valid_len ? n_samples : valid_len;
-    scale_samples(valid + start, copy_len, range_mv, out);
+    scale_samples(valid + start, copy_len, range_mv, out, clipped);
     return copy_len;
 }
 
 static int parse_waveform(const uint8_t *raw, int raw_len, int n_samples,
-                          float range_mv, float *out)
+                          float range_mv, float *out, uint32_t *clipped)
 {
     /* Legacy path: no trigger info, take the tail. */
     return parse_waveform_ex(raw, raw_len, n_samples, n_samples, -100,
-                             range_mv, out);
+                             range_mv, out, clipped);
 }
 
 /* In-place centred moving-average of N taps with edge extension (repeat
@@ -1497,7 +1579,8 @@ static void apply_res_enhancement(ps2204a_device_t *dev, float *buf, int n)
  * Returns samples-per-channel written. Either out_a or out_b may be NULL. */
 static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
                                float range_a_mv, float range_b_mv,
-                               float *out_a, float *out_b)
+                               float *out_a, float *out_b,
+                               uint32_t *clip_a, uint32_t *clip_b)
 {
     const uint8_t *valid;
     int valid_len = find_valid_segment(raw, raw_len, &valid);
@@ -1518,12 +1601,17 @@ static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
     float scale_a = range_a_mv / ADC_HALF_RANGE;
     float scale_b = range_b_mv / ADC_HALF_RANGE;
 
+    uint32_t ca = 0, cb = 0;
     for (int i = 0; i < n_samples; i++) {
         int b_byte = tail[2 * i];
         int a_byte = tail[2 * i + 1];
+        if (a_byte == 0x00 || a_byte == 0xFF) ca++;
+        if (b_byte == 0x00 || b_byte == 0xFF) cb++;
         if (out_b) out_b[i] = ((float)b_byte - ADC_CENTER) * scale_b;
         if (out_a) out_a[i] = ((float)a_byte - ADC_CENTER) * scale_a;
     }
+    if (clip_a) *clip_a = ca;
+    if (clip_b) *clip_b = cb;
     return n_samples;
 }
 
@@ -1730,6 +1818,11 @@ static void *fast_streaming_thread(void *arg)
      * long enough for any of these. */
 
     bool both = dev->ch[0].enabled && dev->ch[1].enabled;
+    /* Single-channel streaming used to be parsed as channel A whichever
+     * channel was actually enabled, so a B-only stream filled ring A and
+     * left ring B full of zeros. Track which channel the single stream
+     * belongs to and route it there. */
+    bool only_b = !dev->ch[0].enabled && dev->ch[1].enabled;
     int block_size = both ? MAX_SAMPLES_DUAL : MAX_SAMPLES_SINGLE;
 
     /* Expected capture time per block. In fast streaming the hardware
@@ -1796,10 +1889,14 @@ static void *fast_streaming_thread(void *arg)
         clock_gettime(CLOCK_MONOTONIC, &t1);
 
         /* Parse waveform(s) */
+        uint32_t clip_a = 0, clip_b = 0;
         int got = both
             ? parse_waveform_dual(raw, n, block_size,
-                                  range_a_mv, range_b_mv, tmp_a, tmp_b)
-            : parse_waveform(raw, n, block_size, range_a_mv, tmp_a);
+                                  range_a_mv, range_b_mv, tmp_a, tmp_b,
+                                  &clip_a, &clip_b)
+            : parse_waveform(raw, n, block_size,
+                             only_b ? range_b_mv : range_a_mv, tmp_a,
+                             only_b ? &clip_b : &clip_a);
         if (got <= 0) continue;
 
         /* Apply per-range calibration BEFORE storing in the ring so the
@@ -1808,21 +1905,26 @@ static void *fast_streaming_thread(void *arg)
          * calibration so a saturated ADC byte doesn't extrapolate past the
          * screen rails when gain > 1. */
         {
-            int ida = range_index(dev->ch[0].range);
+            /* tmp_a carries channel B's samples on a B-only stream, so the
+             * correction it gets must be B's. */
+            int ida = only_b ? range_index(dev->ch[1].range)
+                             : range_index(dev->ch[0].range);
             int idb = range_index(dev->ch[1].range);
+            float rng_single = only_b ? range_b_mv : range_a_mv;
             if (ida >= 0) {
-                float off = dev->cal_offset_mv[ida], g = dev->cal_gain[ida];
+                float off = dev->cal_offset_mv[ida];
+                float g   = dev->cal_gain[only_b ? 1 : 0][ida];
                 if (off != 0.0f || g != 1.0f) {
                     for (int k = 0; k < got; k++) {
                         float v = (tmp_a[k] - off) * g;
-                        if (v >  range_a_mv) v =  range_a_mv;
-                        if (v < -range_a_mv) v = -range_a_mv;
+                        if (v >  rng_single) v =  rng_single;
+                        if (v < -rng_single) v = -rng_single;
                         tmp_a[k] = v;
                     }
                 }
             }
             if (both && idb >= 0) {
-                float off = dev->cal_offset_mv[idb], g = dev->cal_gain[idb];
+                float off = dev->cal_offset_mv[idb], g = dev->cal_gain[1][idb];
                 if (off != 0.0f || g != 1.0f) {
                     for (int k = 0; k < got; k++) {
                         float v = (tmp_b[k] - off) * g;
@@ -1838,8 +1940,20 @@ static void *fast_streaming_thread(void *arg)
         pthread_mutex_lock(&dev->stream_mutex);
         size_t cap = dev->ring_capacity;
         size_t wp  = dev->ring_write_pos;
-        ring_write(dev->ring_a, cap, wp, tmp_a, got);
-        if (both) ring_write(dev->ring_b, cap, wp, tmp_b, got);
+        if (both) {
+            ring_write(dev->ring_a, cap, wp, tmp_a, got);
+            ring_write(dev->ring_b, cap, wp, tmp_b, got);
+        } else if (only_b) {
+            ring_write(dev->ring_b, cap, wp, tmp_a, got);
+        } else {
+            ring_write(dev->ring_a, cap, wp, tmp_a, got);
+        }
+
+        dev->last_overflow.clipped_a  = clip_a;
+        dev->last_overflow.clipped_b  = clip_b;
+        dev->last_overflow.total      = (uint32_t)got;
+        dev->last_overflow.overflow_a = clip_a > 0;
+        dev->last_overflow.overflow_b = clip_b > 0;
 
         dev->ring_write_pos = wp + got;
         dev->stream_blocks++;
@@ -2305,8 +2419,8 @@ static void *sdk_streaming_thread(void *arg)
     int ib = range_index(dev->ch[1].range);
     state.offset_a_mv = (ia >= 0) ? dev->cal_offset_mv[ia] : 0.0f;
     state.offset_b_mv = (ib >= 0) ? dev->cal_offset_mv[ib] : 0.0f;
-    state.gain_a      = (ia >= 0) ? dev->cal_gain[ia]      : 1.0f;
-    state.gain_b      = (ib >= 0) ? dev->cal_gain[ib]      : 1.0f;
+    state.gain_a      = (ia >= 0) ? dev->cal_gain[0][ia]   : 1.0f;
+    state.gain_b      = (ib >= 0) ? dev->cal_gain[1][ib]   : 1.0f;
 
     state.tmp_a = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
     state.tmp_b = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
@@ -2599,10 +2713,33 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
         /* PS_10V   */ 1.119147f,   /* reference: 7.005 V */
         /* PS_20V   */ 1.187060f,   /* reference: 14.000 V */
     };
+    /* Keep the reference-unit numbers as the fallback table, then prefer the
+     * unit's own EEPROM trim when it decodes. */
+    dev->builtin_cal.valid = true;
     for (int r = 0; r < PS_RANGE_COUNT; r++) {
-        dev->cal_offset_mv[r] = FACTORY_OFFSET_MV[r];
-        dev->cal_gain[r] = FACTORY_GAIN[r];
+        dev->builtin_cal.offset_mv[r] = FACTORY_OFFSET_MV[r];
+        dev->builtin_cal.gain[0][r] = FACTORY_GAIN[r];
+        dev->builtin_cal.gain[1][r] = FACTORY_GAIN[r];
     }
+
+    /* The EEPROM table is decoded and exposed, but NOT applied by default.
+     *
+     * Its offsets are solid: reconstructing the hand-measured reference table
+     * from the stored words alone lands within 1.1 % on average. The gain
+     * blocks are not. Measuring one AWG signal across four ranges — which the
+     * correct table must render identically — gave 2.61 % spread with the
+     * EEPROM gains against 1.44 % with the built-in ones, so the block
+     * assignment is still a guess. Switching the default on that evidence
+     * would be trading a known table for an unverified one.
+     *
+     * ps2204a_use_eeprom_calibration(dev, true) opts in; confirming the gain
+     * blocks needs a voltage reference. */
+    parse_eeprom_cal(dev);
+    apply_cal_table(dev, &dev->builtin_cal);
+    dev->using_eeprom_cal = false;
+    printf("  Calibration: built-in reference table%s\n",
+           dev->eeprom_cal.valid
+           ? " (per-unit EEPROM table decoded, available on request)" : "");
 
     /* Default trigger (auto/free-run) */
     build_block_trigger(dev->trigger_cmd);
@@ -3148,23 +3285,33 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     float range_a_mv = (float)get_range_mv(dev->ch[0].range);
     float range_b_mv = (float)get_range_mv(dev->ch[1].range);
     int got = 0;
+    uint32_t clip_a = 0, clip_b = 0;
 
     if (both) {
         got = parse_waveform_dual(raw, raw_n, n,
-                                  range_a_mv, range_b_mv, buf_a, buf_b);
+                                  range_a_mv, range_b_mv, buf_a, buf_b,
+                                  &clip_a, &clip_b);
     } else if (dev->ch[0].enabled && buf_a) {
         int post = dev->trigger_armed
                    ? (n * (100 + dev->trigger_delay_pct)) / 100
                    : n;
         int dp = dev->trigger_armed ? dev->trigger_delay_pct : -100;
-        got = parse_waveform_ex(raw, raw_n, n, post, dp, range_a_mv, buf_a);
+        got = parse_waveform_ex(raw, raw_n, n, post, dp, range_a_mv, buf_a,
+                                &clip_a);
     } else if (dev->ch[1].enabled && buf_b) {
         int post = dev->trigger_armed
                    ? (n * (100 + dev->trigger_delay_pct)) / 100
                    : n;
         int dp = dev->trigger_armed ? dev->trigger_delay_pct : -100;
-        got = parse_waveform_ex(raw, raw_n, n, post, dp, range_b_mv, buf_b);
+        got = parse_waveform_ex(raw, raw_n, n, post, dp, range_b_mv, buf_b,
+                                &clip_b);
     }
+
+    dev->last_overflow.clipped_a  = clip_a;
+    dev->last_overflow.clipped_b  = clip_b;
+    dev->last_overflow.total      = (uint32_t)(got > 0 ? got : 0);
+    dev->last_overflow.overflow_a = clip_a > 0;
+    dev->last_overflow.overflow_b = clip_b > 0;
 
     /* Apply per-range calibration (DC offset subtracted, gain applied).
      * After calibration, clamp to ±range_mv — with gain > 1 the inverse
@@ -3177,7 +3324,7 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     int idx_b = range_index(dev->ch[1].range);
     if (buf_a && dev->ch[0].enabled && idx_a >= 0) {
         float off = dev->cal_offset_mv[idx_a];
-        float g   = dev->cal_gain[idx_a];
+        float g   = dev->cal_gain[0][idx_a];
         float r   = (float)range_a_mv;
         if (off != 0.0f || g != 1.0f) {
             for (int i = 0; i < got; i++) {
@@ -3190,7 +3337,7 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     }
     if (buf_b && dev->ch[1].enabled && idx_b >= 0) {
         float off = dev->cal_offset_mv[idx_b];
-        float g   = dev->cal_gain[idx_b];
+        float g   = dev->cal_gain[1][idx_b];
         float r   = (float)range_b_mv;
         if (off != 0.0f || g != 1.0f) {
             for (int i = 0; i < got; i++) {
@@ -4207,7 +4354,8 @@ ps_status_t ps2204a_set_range_calibration(ps2204a_device_t *dev,
     int idx = range_index(range);
     if (idx < 0) return PS_ERROR_PARAM;
     dev->cal_offset_mv[idx] = offset_mv;
-    dev->cal_gain[idx] = (gain <= 0) ? 1.0f : gain;
+    /* The public API is per-range; apply to both channels. */
+    dev->cal_gain[0][idx] = dev->cal_gain[1][idx] = (gain <= 0) ? 1.0f : gain;
     return PS_OK;
 }
 
@@ -4219,7 +4367,7 @@ ps_status_t ps2204a_get_range_calibration(ps2204a_device_t *dev,
     int idx = range_index(range);
     if (idx < 0) return PS_ERROR_PARAM;
     if (offset_mv) *offset_mv = dev->cal_offset_mv[idx];
-    if (gain)      *gain      = dev->cal_gain[idx];
+    if (gain)      *gain      = dev->cal_gain[0][idx];
     return PS_OK;
 }
 
@@ -4272,6 +4420,115 @@ ps_status_t ps2204a_calibrate_dc_offset(ps2204a_device_t *dev)
 /* Read the raw EEPROM bytes that were fetched during open_unit (pages
  * 0x00, 0x40, 0x80, 0xC0 = 256 bytes total). Useful for anyone who wants
  * to reverse-engineer the PicoTech-specific calibration layout. */
+ps_status_t ps2204a_get_eeprom_calibration(ps2204a_device_t *dev,
+                                           ps_cal_table_t *out)
+{
+    if (!dev || !out) return PS_ERROR_PARAM;
+    *out = dev->eeprom_cal;
+    return PS_OK;
+}
+
+ps_status_t ps2204a_use_eeprom_calibration(ps2204a_device_t *dev, bool enable)
+{
+    if (!dev) return PS_ERROR_PARAM;
+    if (enable && !dev->eeprom_cal.valid) return PS_ERROR_STATE;
+    apply_cal_table(dev, enable ? &dev->eeprom_cal : &dev->builtin_cal);
+    dev->using_eeprom_cal = enable;
+    return PS_OK;
+}
+
+bool ps2204a_eeprom_calibration_active(const ps2204a_device_t *dev)
+{
+    return dev ? dev->using_eeprom_cal : false;
+}
+
+ps_status_t ps2204a_get_last_overflow(ps2204a_device_t *dev,
+                                      ps_overflow_t *out)
+{
+    if (!dev || !out) return PS_ERROR_PARAM;
+    /* Written by the streaming thread under this mutex; a block capture only
+     * ever runs on the caller's thread, so one lock covers both. */
+    pthread_mutex_lock(&dev->stream_mutex);
+    *out = dev->last_overflow;
+    pthread_mutex_unlock(&dev->stream_mutex);
+    return PS_OK;
+}
+
+ps_status_t ps2204a_get_streaming_aggregated(ps2204a_device_t *dev,
+                                             float *min_a, float *max_a,
+                                             float *min_b, float *max_b,
+                                             int n_buckets, int span,
+                                             int *actual_buckets)
+{
+    if (!dev || n_buckets <= 0) return PS_ERROR_PARAM;
+    if (actual_buckets) *actual_buckets = 0;
+
+    bool want_a = (min_a || max_a);
+    bool want_b = (min_b || max_b);
+    if (!want_a && !want_b) return PS_OK;
+
+    /* Snapshot geometry, then size the scratch outside the lock. */
+    pthread_mutex_lock(&dev->stream_mutex);
+    size_t wp = dev->ring_write_pos, cap = dev->ring_capacity;
+    pthread_mutex_unlock(&dev->stream_mutex);
+    if (wp == 0 || cap == 0) return PS_OK;
+
+    size_t avail = wp < cap ? wp : cap;
+    if (span > 0 && (size_t)span < avail) avail = (size_t)span;
+    if (avail == 0) return PS_OK;
+
+    int buckets = n_buckets;
+    if ((size_t)buckets > avail) buckets = (int)avail;   /* need >= 1 sample each */
+
+    float *scratch_a = want_a ? (float *)malloc(avail * sizeof(float)) : NULL;
+    float *scratch_b = want_b ? (float *)malloc(avail * sizeof(float)) : NULL;
+    if ((want_a && !scratch_a) || (want_b && !scratch_b)) {
+        free(scratch_a); free(scratch_b);
+        return PS_ERROR_ALLOC;
+    }
+
+    /* Critical section: copies only, exactly as get_streaming_latest does. */
+    pthread_mutex_lock(&dev->stream_mutex);
+    size_t wp_now = dev->ring_write_pos;
+    if (avail > wp_now) avail = wp_now;
+    if (scratch_a && dev->ring_a) ring_read(dev->ring_a, cap, wp_now, (int)avail, scratch_a);
+    if (scratch_b && dev->ring_b) ring_read(dev->ring_b, cap, wp_now, (int)avail, scratch_b);
+    pthread_mutex_unlock(&dev->stream_mutex);
+
+    for (int k = 0; k < buckets; k++) {
+        /* Spread the remainder instead of dropping it, so the last bucket is
+         * not systematically short. */
+        size_t lo = (avail * (size_t)k)       / (size_t)buckets;
+        size_t hi = (avail * (size_t)(k + 1)) / (size_t)buckets;
+        if (hi <= lo) hi = lo + 1;
+        if (hi > avail) hi = avail;
+
+        if (scratch_a && dev->ring_a) {
+            float mn = scratch_a[lo], mx = scratch_a[lo];
+            for (size_t i = lo + 1; i < hi; i++) {
+                if (scratch_a[i] < mn) mn = scratch_a[i];
+                if (scratch_a[i] > mx) mx = scratch_a[i];
+            }
+            if (min_a) min_a[k] = mn;
+            if (max_a) max_a[k] = mx;
+        }
+        if (scratch_b && dev->ring_b) {
+            float mn = scratch_b[lo], mx = scratch_b[lo];
+            for (size_t i = lo + 1; i < hi; i++) {
+                if (scratch_b[i] < mn) mn = scratch_b[i];
+                if (scratch_b[i] > mx) mx = scratch_b[i];
+            }
+            if (min_b) min_b[k] = mn;
+            if (max_b) max_b[k] = mx;
+        }
+    }
+
+    free(scratch_a);
+    free(scratch_b);
+    if (actual_buckets) *actual_buckets = buckets;
+    return PS_OK;
+}
+
 ps_status_t ps2204a_get_eeprom_raw(ps2204a_device_t *dev,
                                    uint8_t *out, int out_len)
 {

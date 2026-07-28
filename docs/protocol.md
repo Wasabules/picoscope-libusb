@@ -264,10 +264,50 @@ sign because it shares the 5 V PGA plus a digital ÷70 scaling.
 0 V reading; `ps2204a_set_range_calibration()` lets callers store a
 per-range `(offset_mV, gain)` pair that applies at capture time.
 
-EEPROM pages `0x40`–`0xC0` carry factory calibration data. The driver
-reads them into `dev->eeprom_raw[256]`; the internal layout is not yet
-fully decoded so the bytes are exposed via `ps2204a_get_eeprom_raw()`
-rather than being applied automatically.
+### EEPROM factory trim
+
+The 256 bytes read at open (`dev->eeprom_raw`) carry the unit's own
+factory trim. Partially decoded:
+
+| Offset | Contents |
+|--------|----------|
+| `0x13` | serial, ASCII (`JOxxxxxxx`) |
+| `0x1D` | calibration date, ASCII (`21Feb22`) |
+| `0x25` | **9 × int16 LE — per-range DC offset**, in 1/256 ADC code, expressed *after* gain |
+| `0x6D` | 9 × int16 LE, Q14 — gain block 1 (≈ 1.112–1.123) |
+| `0x7F` | 9 × int16 LE, Q14 — gain block 2 (≈ 1.142–1.151) |
+| `0x91` | 18 × `0x4000` — 2 × 9 slots at Q14 unity |
+| `0xC5` | 9 × int16 LE, Q14 — gain block 3 (≈ 1.144), unidentified |
+
+All range-indexed blocks run `PS_50MV … PS_20V`.
+
+**Offsets — confirmed.** Correlating the words at `0x25` against the
+hand-measured reference table gives Pearson *r* = 0.9989. The conversion is
+
+```
+offset_mV = (word / 256) × (range_mV / 128) / gain
+```
+
+Reconstructing the hand-measured table from the EEPROM alone lands within
+1.1 % on average and 0.1 % on several ranges — inside the noise of the
+original measurements.
+
+**Gains — not confirmed.** Three Q14 blocks of the right shape exist and
+their magnitude matches the measured gains (~1.11–1.15), but which belongs
+to which channel is still a guess, and the evidence argues against the
+current one: measuring a single AWG signal across four ranges, which the
+correct table must render identically, gave **2.61 %** spread using the
+EEPROM gains against **1.44 %** using the built-in table. Settling this
+needs a voltage reference.
+
+Accordingly `ps2204a_get_eeprom_calibration()` exposes the decoded table
+and `ps2204a_use_eeprom_calibration()` opts into it, but the driver still
+applies the built-in reference table by default.
+
+Note also that the built-in 50 mV gain (1.4722) is a ~30 % outlier against
+every other range (~1.11–1.19) and against all three EEPROM blocks (~1.12).
+It was measured against a 28 mV reference — the smallest reference on the
+smallest range — and is the most likely candidate for a bad measurement.
 
 ## USB tracing tips
 
