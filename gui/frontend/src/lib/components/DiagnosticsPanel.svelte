@@ -1,16 +1,17 @@
 <script>
-  export let connected = false;
-  export let isStreaming = false;
-  export let rawPreview = null;
-
-  export let onCaptureRaw = () => {};
+  let {
+    connected    = false,
+    isStreaming  = false,
+    rawPreview   = null,
+    onCaptureRaw = () => {},
+  } = $props();
 </script>
 
 <details class="panel">
   <summary>Diagnostics</summary>
   <div class="panel-content">
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onCaptureRaw}
+      <button class="btn btn-primary" onclick={onCaptureRaw}
               disabled={!connected || isStreaming}>
         Capture Raw
       </button>

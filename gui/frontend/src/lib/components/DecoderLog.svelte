@@ -5,23 +5,25 @@
    * SINGLE <pre> text node that we rebuild on each decode. No reactive each
    * block, no per-row DOM — just one big string swap.
    */
-  export let decoderState = { decoder: null, events: [], error: '' };
-  export let collapsed = false;
+  let {
+    decoderState = { decoder: null, events: [], error: '' },
+    collapsed = $bindable(false),
+  } = $props();
 
   const DISPLAY_LIMIT = 200;
 
-  let mode = 'table';        // 'table' | 'stream'
-  let hexView = true;
-  let autoScroll = true;
-  let filterKind = 'all';    // 'all' | 'byte' | 'error'
-  let logEl;
+  let mode = $state('table');        // 'table' | 'stream'
+  let hexView = $state(true);
+  let autoScroll = $state(true);
+  let filterKind = $state('all');    // 'all' | 'byte' | 'error'
+  let logEl = $state();
 
-  $: decoder = decoderState.decoder;
-  $: events  = decoderState.events || [];
-  $: error   = decoderState.error  || '';
-  $: counts  = tallyCounts(events);
+  const decoder = $derived(decoderState.decoder);
+  const events  = $derived(decoderState.events || []);
+  const error   = $derived(decoderState.error  || '');
+  const counts  = $derived(tallyCounts(events));
 
-  $: text = renderText(events, mode, hexView, filterKind);
+  const text = $derived(renderText(events, mode, hexView, filterKind));
 
   function tallyCounts(evs) {
     let b = 0, e = 0, o = 0;
@@ -93,19 +95,23 @@
 
   // Auto-scroll — one-shot rAF per text change, so layout-thrash stays bounded
   // even if `text` bursts.
+  // `scrollPending` is deliberately a plain `let`, not `$state` — the effect
+  // writes it, and making it reactive would re-trigger the effect it guards.
   let scrollPending = false;
-  $: if (autoScroll && logEl && text && !scrollPending) {
-    scrollPending = true;
-    requestAnimationFrame(() => {
-      scrollPending = false;
-      if (logEl) logEl.scrollTop = logEl.scrollHeight;
-    });
-  }
+  $effect(() => {
+    if (autoScroll && logEl && text && !scrollPending) {
+      scrollPending = true;
+      requestAnimationFrame(() => {
+        scrollPending = false;
+        if (logEl) logEl.scrollTop = logEl.scrollHeight;
+      });
+    }
+  });
 </script>
 
 <div class="decoder-log" class:collapsed>
   <div class="log-header">
-    <button class="hdr-collapse" on:click={() => collapsed = !collapsed}
+    <button class="hdr-collapse" onclick={() => collapsed = !collapsed}
             title={collapsed ? 'Expand' : 'Collapse'}>
       {collapsed ? '▸' : '▾'}
     </button>
@@ -132,17 +138,17 @@
       <div class="hdr-controls">
         <div class="seg">
           <button class:active={mode === 'table'}
-                  on:click={() => mode = 'table'}>Table</button>
+                  onclick={() => mode = 'table'}>Table</button>
           <button class:active={mode === 'stream'}
-                  on:click={() => mode = 'stream'}>Stream</button>
+                  onclick={() => mode = 'stream'}>Stream</button>
         </div>
 
         {#if mode === 'stream'}
           <div class="seg">
             <button class:active={hexView}
-                    on:click={() => hexView = true}>Hex</button>
+                    onclick={() => hexView = true}>Hex</button>
             <button class:active={!hexView}
-                    on:click={() => hexView = false}>ASCII</button>
+                    onclick={() => hexView = false}>ASCII</button>
           </div>
         {:else}
           <select bind:value={filterKind} title="Filter events">
@@ -156,7 +162,7 @@
           </label>
         {/if}
 
-        <button class="ctl" on:click={copyAll} title="Copy to clipboard">Copy</button>
+        <button class="ctl" onclick={copyAll} title="Copy to clipboard">Copy</button>
       </div>
     {/if}
   </div>

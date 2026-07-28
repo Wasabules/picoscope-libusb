@@ -1,21 +1,23 @@
 <script>
-  export let ranges = [];
-  export let range = '5V';
-  export let offsetMv = 0;
-  export let gain = 1;
-  export let connected = false;
-  export let isStreaming = false;
+  let {
+    range    = $bindable('5V'),
+    offsetMv = $bindable(0),
+    gain     = $bindable(1),
+    ranges      = [],
+    connected   = false,
+    isStreaming = false,
 
-  export let onOpenEditor = () => {};
-  export let onAutoCalibrate = () => {};
-  export let onApply = () => {};
+    onOpenEditor    = () => {},
+    onAutoCalibrate = () => {},
+    onApply         = () => {},
+  } = $props();
 </script>
 
 <details class="panel">
   <summary>Calibration</summary>
   <div class="panel-content">
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onOpenEditor}
+      <button class="btn btn-primary" onclick={onOpenEditor}
               disabled={!connected}>
         Open calibration editor
       </button>
@@ -27,7 +29,7 @@
       <span class="meas-label">Short your inputs (or leave them floating) to 0 V, then click:</span>
     </div>
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onAutoCalibrate}
+      <button class="btn btn-primary" onclick={onAutoCalibrate}
               disabled={!connected || isStreaming}>
         Auto-calibrate DC offset
       </button>
@@ -50,7 +52,7 @@
       <input type="number" bind:value={gain} step="0.01" min="0.1" max="5">
     </div>
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onApply}
+      <button class="btn btn-primary" onclick={onApply}
               disabled={!connected}>Apply to range</button>
     </div>
   </div>

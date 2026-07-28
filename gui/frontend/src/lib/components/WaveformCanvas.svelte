@@ -1,42 +1,50 @@
 <script>
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
 
   /* Pure renderer — parent supplies the already-windowed slice. */
-  export let samplesA = null;         // Array|Float32Array of mV samples, or null
-  export let samplesB = null;
-  export let samplesM = null;         // Math channel samples (optional)
-  export let channelAEnabled = true;
-  export let channelBEnabled = false;
-  export let mathLabel = '';          // '' = no math trace
-  export let rangeMvA = 5000;
-  export let rangeMvB = 5000;
-  /* Optional per-channel vertical offset (mV, subtracted before scaling)
-   * and V/div. When vdivA/B > 0, that channel uses its own vertical zoom
-   * independent of the range; the Y-axis labels then show the A channel's
-   * scale unless xxDivB is toggled. */
-  export let offsetMvA = 0;
-  export let offsetMvB = 0;
-  export let vdivMvA = 0;    // 0 = auto (use range)
-  export let vdivMvB = 0;    // 0 = auto (use range)
-  export let yCursorsOn = false;
-  export let yCursor1Mv = 100;
-  export let yCursor2Mv = -100;
+  let {
+    samplesA = null,         // Array|Float32Array of mV samples, or null
+    samplesB = null,
+    samplesM = null,         // Math channel samples (optional)
+    channelAEnabled = true,
+    channelBEnabled = false,
+    mathLabel = '',          // '' = no math trace
+    rangeMvA = 5000,
+    rangeMvB = 5000,
+    /* Optional per-channel vertical offset (mV, subtracted before scaling)
+     * and V/div. When vdivA/B > 0, that channel uses its own vertical zoom
+     * independent of the range; the Y-axis labels then show the A channel's
+     * scale unless xxDivB is toggled. */
+    offsetMvA = 0,
+    offsetMvB = 0,
+    vdivMvA = 0,    // 0 = auto (use range)
+    vdivMvB = 0,    // 0 = auto (use range)
+    yCursorsOn = false,
+    yCursor1Mv = 100,
+    yCursor2Mv = -100,
 
-  /** @type {Array<{t_ns:number,t_end_ns?:number,kind:string,annotation?:string,text?:string,level?:string}>} */
-  export let annotations = null;
-  export let startTimeNs = 0;         // time of first sample relative to viewport
-  export let spanNs = 0;              // total visible time (ns). 0 = unknown / auto
+    /** @type {Array<{t_ns:number,t_end_ns?:number,kind:string,annotation?:string,text?:string,level?:string}>} */
+    annotations = null,
+    startTimeNs = 0,         // time of first sample relative to viewport
+    spanNs = 0,              // total visible time (ns). 0 = unknown / auto
 
-  export let xyMode = false;          // A vs B Lissajous instead of time traces
-  export let cursorsOn = false;
-  export let cursor1Pct = 30;
-  export let cursor2Pct = 70;
-  export let persistenceOn = false;   // composite traces with alpha, don't erase fully
+    xyMode = false,          // A vs B Lissajous instead of time traces
+    cursorsOn = false,
+    cursor1Pct = 30,
+    cursor2Pct = 70,
+    persistenceOn = false,   // composite traces with alpha, don't erase fully
 
-  const dispatch = createEventDispatcher();
+    /* Interaction callbacks (were `createEventDispatcher` events). */
+    onzoom        = () => {},
+    onzoomBegin   = () => {},
+    onzoomTo      = () => {},
+    onpan         = () => {},
+    oncursormove  = () => {},
+    onycursormove = () => {},
+  } = $props();
 
-  let canvas;
-  let ctx;
+  let canvas = $state();
+  let ctx = $state();
   let width = 800;
   let height = 500;
 
@@ -420,7 +428,7 @@
     const localX = ev.clientX - rect.left - r.x;
     if (localX < 0 || localX > r.w) return;
     ev.preventDefault();
-    dispatch('zoom', {
+    onzoom( {
       deltaY: ev.deltaY,
       fracX: localX / r.w,
     });
@@ -451,7 +459,7 @@
       // Parent auto-pauses streaming so the ring doesn't roll under the
       // selection during the drag — otherwise the released rectangle
       // maps to different absolute times than what the user saw.
-      dispatch('zoomBegin');
+      onzoomBegin();
       draw();
       return;
     }
@@ -492,7 +500,7 @@
     const localY = ev.clientY - rect.top - r.y;
     if (dragCursor === 1 || dragCursor === 2) {
       const pct = Math.max(0, Math.min(100, (localX / r.w) * 100));
-      dispatch('cursormove', { which: dragCursor, pct });
+      oncursormove( { which: dragCursor, pct });
       dragLastX = ev.clientX;
       return;
     }
@@ -501,14 +509,14 @@
       const halfA = vdivMvA > 0 ? vdivMvA * (GRID_ROWS / 2) : rangeMvA;
       const sc = (r.h / 2) / halfA;
       const mv = -(localY - r.h / 2) / sc - offsetMvA;
-      dispatch('ycursormove', { which: dragCursor === 3 ? 1 : 2, mv });
+      onycursormove( { which: dragCursor === 3 ? 1 : 2, mv });
       dragLastX = ev.clientX;
       return;
     }
     const dxPx = ev.clientX - dragLastX;
     dragLastX = ev.clientX;
     if (r.w > 0 && dxPx !== 0) {
-      dispatch('pan', { dxFrac: dxPx / r.w });
+      onpan( { dxFrac: dxPx / r.w });
     }
   }
 
@@ -522,7 +530,7 @@
       canvas.style.cursor = 'crosshair';
       // Minimum width: 1 % of plot to avoid firing on accidental clicks.
       if (r.w > 0 && (x1 - x0) / r.w >= 0.01) {
-        dispatch('zoomTo', {
+        onzoomTo( {
           startFrac: Math.max(0, x0 / r.w),
           endFrac:   Math.min(1, x1 / r.w),
         });
@@ -539,16 +547,20 @@
 
   function onContextMenu(ev) { ev.preventDefault(); }
 
-  /* Reactive redraw when any prop changes */
-  $: if (ctx) {
-    samplesA; samplesB; samplesM; rangeMvA; rangeMvB; startTimeNs; spanNs;
-    channelAEnabled; channelBEnabled; mathLabel;
-    xyMode; cursorsOn; cursor1Pct; cursor2Pct; persistenceOn;
-    offsetMvA; offsetMvB; vdivMvA; vdivMvB;
-    yCursorsOn; yCursor1Mv; yCursor2Mv;
-    annotations;
-    draw();
-  }
+  /* Reactive redraw when any prop changes.
+   * The dependency list stays explicit and `draw()` runs untracked: reading
+   * it as a plain call would subscribe the effect to every piece of state the
+   * renderer touches (drag offsets, zoom-rect pixels), turning each pointer
+   * move into a redraw on top of the ones the handlers already trigger. */
+  $effect(() => {
+    void [samplesA, samplesB, samplesM, rangeMvA, rangeMvB, startTimeNs, spanNs,
+          channelAEnabled, channelBEnabled, mathLabel,
+          xyMode, cursorsOn, cursor1Pct, cursor2Pct, persistenceOn,
+          offsetMvA, offsetMvB, vdivMvA, vdivMvB,
+          yCursorsOn, yCursor1Mv, yCursor2Mv,
+          annotations];
+    if (ctx) untrack(() => draw());
+  });
 
   onMount(() => {
     ctx = canvas.getContext('2d');
@@ -569,12 +581,12 @@
 <div class="canvas-container">
   <canvas
     bind:this={canvas}
-    on:wheel={onWheel}
-    on:pointerdown={onPointerDown}
-    on:pointermove={onPointerMove}
-    on:pointerup={onPointerUp}
-    on:pointercancel={onPointerUp}
-    on:contextmenu={onContextMenu}
+    onwheel={onWheel}
+    onpointerdown={onPointerDown}
+    onpointermove={onPointerMove}
+    onpointerup={onPointerUp}
+    onpointercancel={onPointerUp}
+    oncontextmenu={onContextMenu}
     title="Drag = pan · Shift+drag or right-drag = box zoom · Wheel = zoom · ΔtΔV cursors drag when enabled"
   ></canvas>
 </div>

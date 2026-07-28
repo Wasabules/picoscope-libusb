@@ -1,13 +1,15 @@
 <script>
   import { fmtRate, fmtCount } from '../utils/format.js';
 
-  export let connected = false;
-  export let serial = '';
-  export let calDate = '';
-  export let isStreaming = false;
-  export let streamStats = null;
-  export let waveformData = null;
-  export let timebases = [];
+  let {
+    connected = false,
+    serial = '',
+    calDate = '',
+    isStreaming = false,
+    streamStats = null,
+    waveformData = null,
+    timebases = [],
+  } = $props();
 </script>
 
 <div class="status-bar">

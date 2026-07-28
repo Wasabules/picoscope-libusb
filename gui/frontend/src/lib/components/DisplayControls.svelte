@@ -1,28 +1,31 @@
 <script>
   import { fmtTime } from '../utils/format.js';
 
-  export let presets = [];
-  export let timePerDivNs = 0;
-  export let tdLabel = 'Auto';
-  export let tdOpen = false;
-  export let tdButton = null;
+  let {
+    tdButton = $bindable(null),
 
-  export let offsetActive = false;
-  export let dualRangeActive = false;
-  export let windowStartPct = 0;
-  export let windowEndPct = 100;
-  export let spanNs = 0;
+    presets = [],
+    timePerDivNs = 0,
+    tdLabel = 'Auto',
+    tdOpen = false,
 
-  export let isStreaming = false;
-  export let streamPaused = false;
+    offsetActive = false,
+    dualRangeActive = false,
+    windowStartPct = 0,
+    windowEndPct = 100,
+    spanNs = 0,
 
-  export let onTdToggle = () => {};
-  export let onTdPick = () => {};
-  export let onShiftDiv = () => {};
-  export let onTogglePause = () => {};
-  export let onFit = () => {};
-  export let onRangeMinInput = () => {};
-  export let onRangeMaxInput = () => {};
+    isStreaming = false,
+    streamPaused = false,
+
+    onTdToggle = () => {},
+    onTdPick = () => {},
+    onShiftDiv = () => {},
+    onTogglePause = () => {},
+    onFit = () => {},
+    onRangeMinInput = () => {},
+    onRangeMaxInput = () => {},
+  } = $props();
 </script>
 
 <div class="display-controls">
@@ -30,7 +33,7 @@
 
   <div class="ctl-dropdown" bind:this={tdButton}>
     <button type="button" class="ctl-dropdown-trigger"
-            on:click={onTdToggle}
+            onclick={onTdToggle}
             aria-haspopup="listbox" aria-expanded={tdOpen}>
       {tdLabel} <span class="caret">▾</span>
     </button>
@@ -41,7 +44,7 @@
               class:selected={p.ns === timePerDivNs}
               role="option"
               aria-selected={p.ns === timePerDivNs}
-              on:click={(ev) => onTdPick(p.ns, ev)}>
+              onclick={(ev) => onTdPick(p.ns, ev)}>
             {p.label}
           </li>
         {/each}
@@ -49,20 +52,20 @@
     {/if}
   </div>
 
-  <button class="ctl-btn" on:click={() => onShiftDiv(-1)}
+  <button class="ctl-btn" onclick={() => onShiftDiv(-1)}
           disabled={!offsetActive} title="Previous division">◁</button>
-  <button class="ctl-btn" on:click={() => onShiftDiv(1)}
+  <button class="ctl-btn" onclick={() => onShiftDiv(1)}
           disabled={!offsetActive} title="Next division">▷</button>
 
   {#if isStreaming}
     <button class="ctl-btn" class:active={streamPaused}
-            on:click={onTogglePause}
+            onclick={onTogglePause}
             title={streamPaused ? 'Resume live roll' : 'Pause streaming view'}>
       {streamPaused ? '▶ Resume' : '⏸ Pause'}
     </button>
   {/if}
 
-  <button class="ctl-btn" on:click={onFit} title="Fit entire buffer">Fit</button>
+  <button class="ctl-btn" onclick={onFit} title="Fit entire buffer">Fit</button>
 
   <div class="dual-range" class:disabled={!dualRangeActive}
        title="Drag either handle to define the visible window (start / end)">
@@ -72,13 +75,13 @@
     <input type="range" class="dual-range-input dual-range-min"
            min="0" max="100" step="0.1"
            value={windowStartPct}
-           on:input={onRangeMinInput}
+           oninput={onRangeMinInput}
            disabled={!dualRangeActive}
            aria-label="Window start">
     <input type="range" class="dual-range-input dual-range-max"
            min="0" max="100" step="0.1"
            value={windowEndPct}
-           on:input={onRangeMaxInput}
+           oninput={onRangeMaxInput}
            disabled={!dualRangeActive}
            aria-label="Window end">
   </div>

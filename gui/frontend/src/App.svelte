@@ -40,60 +40,59 @@
   } from '../wailsjs/go/main/App.js';
 
   // Connection state
-  let connected = false;
-  let serial = '';
-  let calDate = '';
-  let connecting = false;
+  let connected = $state(false);
+  let serial = $state('');
+  let calDate = $state('');
+  let connecting = $state(false);
 
   // Channel config
-  let chAEnabled = true;
-  let chACoupling = 'DC';
-  let chARange = '5V';
-  let chBEnabled = false;
-  let chBCoupling = 'DC';
-  let chBRange = '5V';
+  let chAEnabled = $state(true);
+  let chACoupling = $state('DC');
+  let chARange = $state('5V');
+  let chBEnabled = $state(false);
+  let chBCoupling = $state('DC');
+  let chBRange = $state('5V');
 
   // Timebase & sampling
-  let timebase = 5;
-  let timebases = [];
-  let samples = 8064;
-  let maxSamples = 8064;
+  let timebase = $state(5);
+  let timebases = $state([]);
+  let samples = $state(8064);
+  let maxSamples = $state(8064);
 
   // Streaming mode
-  let streamMode = 'fast'; // 'fast' or 'native'
-  let rawPreview = null;   // last raw capture
+  let streamMode = $state('fast'); // 'fast' or 'native'
+  let rawPreview = $state.raw(null);   // last raw capture
 
   // Trigger
-  let triggerEnabled = false;
-  let triggerSource = 'A';
-  let triggerThreshold = 0;
-  let triggerDirection = 'rising';
-  let triggerAutoMs = 5000;
+  let triggerEnabled = $state(false);
+  let triggerSource = $state('A');
+  let triggerThreshold = $state(0);
+  let triggerDirection = $state('rising');
+  let triggerAutoMs = $state(5000);
 
   // Signal generator (fixed freq + extended sweep/offset/duty options)
-  let siggenEnabled = false;
-  let siggenWave = 'sine';
-  let siggenFreq = 1000;
-  let siggenAmpMv = 1000;   // peak-to-peak amplitude (mV)
-  let siggenOffsetMv = 0;   // DC offset (mV)
-  let siggenDuty = 50;      // square wave duty cycle (%)
-  let siggenSweep = false;
-  let siggenStopFreq = 5000;
-  let siggenSweepInc = 100;
-  let siggenSweepDwell = 0.05;
+  let siggenEnabled = $state(false);
+  let siggenWave = $state('sine');
+  let siggenFreq = $state(1000);
+  let siggenAmpMv = $state(1000);   // peak-to-peak amplitude (mV)
+  let siggenOffsetMv = $state(0);   // DC offset (mV)
+  let siggenDuty = $state(50);      // square wave duty cycle (%)
+  let siggenSweep = $state(false);
+  let siggenStopFreq = $state(5000);
+  let siggenSweepInc = $state(100);
+  let siggenSweepDwell = $state(0.05);
 
   // Waveform data (last single-shot capture)
-  let waveformData = null;
-  let isStreaming = false;
-  let capturing = false;
+  let waveformData = $state.raw(null);
+  let isStreaming = $state(false);
+  let capturing = $state(false);
 
   // Streaming stats
-  let streamStats = null;
+  let streamStats = $state.raw(null);
 
   // Measurements (computed on visible slice)
-  let measA = null;
-  let measB = null;
-  let measM = null; // math channel measurements
+  // measA / measB / measM are pure functions of the visible slice — declared
+  // as $derived further down, next to the slice they depend on.
 
   // User-selectable measurement panel. Every metric in `MEAS_CATALOG` is
   // always computed (the cost is negligible on a 1-div slice), but the
@@ -112,31 +111,31 @@
     { key: 'fallNs', label: 'Fall',   group: 'time', fmt: 'time' },
   ];
   const MEAS_DEFAULT = ['vpp', 'mean', 'rms', 'freqHz', 'duty'];
-  let measKeys = new Set(MEAS_DEFAULT);
-  let measMenuOpen = false;
+  let measKeys = $state(new Set(MEAS_DEFAULT));
+  let measMenuOpen = $state(false);
   function toggleMeasKey(key) {
     if (measKeys.has(key)) measKeys.delete(key);
     else measKeys.add(key);
     measKeys = new Set(measKeys); // trigger reactivity
   }
   // Math channel + cursors + XY mode
-  let mathOp = 'none';       // none | add | sub | mul | inva | invb
-  let cursorsOn = false;
-  let cursor1Pct = 30;       // 0..100 horizontal position
-  let cursor2Pct = 70;
-  let yCursorsOn = false;
-  let yCursor1Mv = 200;
-  let yCursor2Mv = -200;
-  let xyMode = false;
+  let mathOp = $state('none');       // none | add | sub | mul | inva | invb
+  let cursorsOn = $state(false);
+  let cursor1Pct = $state(30);       // 0..100 horizontal position
+  let cursor2Pct = $state(70);
+  let yCursorsOn = $state(false);
+  let yCursor1Mv = $state(200);
+  let yCursor2Mv = $state(-200);
+  let xyMode = $state(false);
   // Per-channel vertical offset (mV) + V/div (0 = auto from range)
-  let offsetMvA = 0;
-  let offsetMvB = 0;
-  let vdivMvA = 0;
-  let vdivMvB = 0;
+  let offsetMvA = $state(0);
+  let offsetMvB = $state(0);
+  let vdivMvA = $state(0);
+  let vdivMvB = $state(0);
   // FFT + averaging toggles (Phase 2)
-  let fftOn = false;
-  let avgN = 1;              // 1 | 4 | 16 | 64
-  let persistenceOn = false;
+  let fftOn = $state(false);
+  let avgN = $state(1);              // 1 | 4 | 16 | 64
+  let persistenceOn = $state(false);
 
   // --- Display window / scope controls ---
   // timePerDivNs = 0 -> auto (fit entire buffer). Otherwise total visible = timePerDivNs * 10.
@@ -165,16 +164,19 @@
     { ns: 5e9,   label: '5 s'    },
     { ns: 1e10,  label: '10 s'   },
   ];
-  let timePerDivNs = 0;        // 0 = auto
-  let displayOffsetPct = 100;  // 0..100, where the trailing edge sits in the buffer
-  let streamPaused = false;
+  let timePerDivNs = $state(0);        // 0 = auto
+  let displayOffsetPct = $state(100);  // 0..100, where the trailing edge sits in the buffer
+  let streamPaused = $state(false);
 
   // Frame averaging: keep the last N blocks for each channel and show the
   // pointwise mean. Resets when the user changes avgN or channel enables.
+  // Plain `let`, deliberately not `$state`: these are written and read only
+  // from the waveform event handler, and each entry is a full sample block —
+  // a deep state proxy over them would be pure overhead.
   let avgQueueA = [];
   let avgQueueB = [];
   function resetAvg() { avgQueueA = []; avgQueueB = []; }
-  $: if (avgN || chAEnabled || chBEnabled) resetAvg();
+  $effect(() => { if (avgN || chAEnabled || chBEnabled) resetAvg(); });
 
   function pushAvg(queue, arr) {
     if (!arr || !arr.length) return queue;
@@ -204,21 +206,21 @@
   // the canvas in the previous implementation).
   // 4M samples ≈ 5.37 s at fast-streaming dt=1280 ns, enough to cover up to
   // 500 ms/div × 10 divisions. At 2 channels × 4 bytes that's 32 MB — fine.
-  let streamRingA = null;   // Float32Array(RING_CAP) — allocated on first use
-  let streamRingB = null;
-  let streamRingALen  = 0;  // valid sample count (≤ RING_CAP)
-  let streamRingBLen  = 0;
-  let streamRingHeadA = 0;  // next write index into the circular buffer
-  let streamRingHeadB = 0;
+  let streamRingA = $state.raw(null);   // Float32Array(RING_CAP) — allocated on first use
+  let streamRingB = $state.raw(null);
+  let streamRingALen = $state(0);  // valid sample count (≤ RING_CAP)
+  let streamRingBLen  = $state(0);
+  let streamRingHeadA = $state(0);  // next write index into the circular buffer
+  let streamRingHeadB = $state(0);
   // Per-sample wall-clock spacing (ns) — updated from streamStats.samplesPerSec.
-  let effectiveDtNs = 0;
+  let effectiveDtNs = $state(0);
   // Last-known per-sample metadata while streaming
-  let lastStreamTimebaseNs = 0;
-  let lastStreamRangeMvA = 5000;
-  let lastStreamRangeMvB = 5000;
+  let lastStreamTimebaseNs = $state(0);
+  let lastStreamRangeMvA = $state(5000);
+  let lastStreamRangeMvB = $state(5000);
 
   // Error handling
-  let errorMsg = '';
+  let errorMsg = $state('');
   let errorTimeout;
 
   const RANGES = ['50mV', '100mV', '200mV', '500mV', '1V', '2V', '5V', '10V', '20V'];
@@ -459,15 +461,15 @@
   }
 
   /* ------------ Calibration handlers ------------ */
-  let calModalOpen = false;
-  let fwModalOpen = false;
-  let fwInstalled = true; // optimistic — flipped by the startup probe
-  let decoderAnnotations = [];
-  let decoderState = { decoder: null, events: [], error: '' };
-  let decoderLogCollapsed = false;
-  let calRange = '2V';
-  let calOffsetMv = 0;
-  let calGain = 1.0;
+  let calModalOpen = $state(false);
+  let fwModalOpen = $state(false);
+  let fwInstalled = $state(true); // optimistic — flipped by the startup probe
+  let decoderAnnotations = $state.raw([]);
+  let decoderState = $state.raw({ decoder: null, events: [], error: '' });
+  let decoderLogCollapsed = $state(false);
+  let calRange = $state('2V');
+  let calOffsetMv = $state(0);
+  let calGain = $state(1.0);
   async function handleCalibrateDCOffset() {
     try {
       await CalibrateDCOffset();
@@ -483,9 +485,9 @@
 
   /* ------------ Presets (settings snapshots in localStorage) ------------ */
   const PRESET_KEY = 'picoscope_presets_v1';
-  let presets = {};
-  let presetName = '';
-  let selectedPreset = '';
+  let presets = $state({});
+  let presetName = $state('');
+  let selectedPreset = $state('');
 
   function loadPresetsFromStorage() {
     try {
@@ -663,7 +665,7 @@
     } catch (e) { showError('Export failed: ' + e); }
   }
 
-  let waveformCanvasRef;
+  let waveformCanvasRef = $state();
   async function handleExportPNG() {
     if (!waveformCanvasRef || !waveformCanvasRef.snapshotDataURL) return;
     const url = waveformCanvasRef.snapshotDataURL();
@@ -688,11 +690,12 @@
   // Radix-2 Cooley-Tukey FFT on real input. Input is padded/truncated to
   // the nearest power of 2, windowed with Hann, and returned as magnitude
   // in dBFS-normalized-to-1.0. Output length is N/2 (positive frequencies).
-  $: fftResult = (fftOn && visible && visible.samplesA && visible.samplesA.length >= 16 && viewDtNs > 0)
-    ? fftMag(visible.samplesA, 1e9 / viewDtNs)
-    : null;
+  const fftResult = $derived(
+    (fftOn && visible && visible.samplesA && visible.samplesA.length >= 16 && viewDtNs > 0)
+      ? fftMag(visible.samplesA, 1e9 / viewDtNs)
+      : null);
 
-  let fftCanvas;
+  let fftCanvas = $state();
   function drawFft() {
     if (!fftCanvas || !fftResult) return;
     const dpr = window.devicePixelRatio || 1;
@@ -754,7 +757,7 @@
     c.fillText('Peak: ' + pfStr + '  (' + peakMag.toFixed(1) + ' dB)', ml + 5, mt + 5);
   }
 
-  $: if (fftOn && fftResult) drawFft();
+  $effect(() => { if (fftOn && fftResult) drawFft(); });
 
   /* Ring buffer ops are pure functions in lib/dsp/ring.js; App.svelte owns
    * the (buf, head, len) cursors and wraps push/clear for reactivity. */
@@ -950,9 +953,9 @@
     if (unsubStopped) unsubStopped();
   });
 
-  $: currentRangeMvA = RANGE_MV[chARange] || 5000;
-  $: currentRangeMvB = RANGE_MV[chBRange] || 5000;
-  $: tbLabel = timebases[timebase] ? timebases[timebase].label : '';
+  const currentRangeMvA = $derived(RANGE_MV[chARange] || 5000);
+  const currentRangeMvB = $derived(RANGE_MV[chBRange] || 5000);
+  const tbLabel = $derived(timebases[timebase] ? timebases[timebase].label : '');
 
   // Choose the visible per-sample spacing (wall-clock while streaming).
   // Per-sample time spacing: ALWAYS the timebase's nominal dt (10 * 2^TB ns).
@@ -960,15 +963,15 @@
   // signal time, not wall-clock acquisition rate (which includes block dead
   // time in fast-streaming). `effectiveDtNs` is kept only for the rate
   // display in the status bar.
-  $: viewDtNs = isStreaming
+  const viewDtNs = $derived(isStreaming
        ? (lastStreamTimebaseNs > 0 ? lastStreamTimebaseNs : effectiveDtNs)
-       : (waveformData ? waveformData.timebaseNs : 0);
+       : (waveformData ? waveformData.timebaseNs : 0));
 
   // Slice the correct chunk of data for the canvas.
   // - streaming + unpaused: last N samples (roll mode)
   // - otherwise: N samples starting at displayOffsetPct * (total-N)
   // - timePerDivNs == 0 (auto): full buffer, no slicing
-  $: visible = (() => {
+  const visible = $derived.by(() => {
     // Pick source arrays.
     let srcA, srcB, rangeA, rangeB;
     if (isStreaming) {
@@ -1052,38 +1055,36 @@
       rangeMvA: rangeA,
       rangeMvB: rangeB,
     };
-  })();
+  });
 
   // Full scope-style measurements: min, max, mean, pp, RMS, frequency,
   // period, duty cycle — estimated over the visible slice with simple
   // zero-crossing detection (with hysteresis to resist DAC noise).
-  $: mathTrace = computeMath(mathOp, visible.samplesA, visible.samplesB);
+  const mathTrace = $derived(computeMath(mathOp, visible.samplesA, visible.samplesB));
 
-  $: {
-    const v = visible;
-    const dt = viewDtNs;
-    measA = (v && v.samplesA && chAEnabled) ? computeMeas(v.samplesA, dt) : null;
-    measB = (v && v.samplesB && chBEnabled) ? computeMeas(v.samplesB, dt) : null;
-    measM = (mathTrace) ? computeMeas(mathTrace, dt) : null;
-  }
+  const measA = $derived((visible && visible.samplesA && chAEnabled)
+    ? computeMeas(visible.samplesA, viewDtNs) : null);
+  const measB = $derived((visible && visible.samplesB && chBEnabled)
+    ? computeMeas(visible.samplesB, viewDtNs) : null);
+  const measM = $derived(mathTrace ? computeMeas(mathTrace, viewDtNs) : null);
 
   // ---- Rolling statistics (min/max/avg of each measurement over last N frames).
-  let statsEnabled = false;
-  let statsA = makeEmptyStats();
-  let statsB = makeEmptyStats();
-  $: if (statsEnabled) { pushStat(statsA, measA); pushStat(statsB, measB); }
-  $: statsADisplay = statsEnabled ? aggregateStatsBag(statsA) : null;
-  $: statsBDisplay = statsEnabled ? aggregateStatsBag(statsB) : null;
+  let statsEnabled = $state(false);
+  let statsA = $state(makeEmptyStats());
+  let statsB = $state(makeEmptyStats());
+  $effect(() => { if (statsEnabled) { pushStat(statsA, measA); pushStat(statsB, measB); } });
+  const statsADisplay = $derived(statsEnabled ? aggregateStatsBag(statsA) : null);
+  const statsBDisplay = $derived(statsEnabled ? aggregateStatsBag(statsB) : null);
   function resetStats() { statsA = makeEmptyStats(); statsB = makeEmptyStats(); }
 
   // --- Controls wiring ---
   function onCanvasZoom(ev) {
-    const { deltaY, fracX } = ev.detail;
+    const { deltaY, fracX } = ev;
     cycleTimeDiv(deltaY < 0 ? -1 : 1, fracX);
   }
   function onCanvasPan(ev) {
     if (isStreaming && !streamPaused) return; // roll mode ignores pan
-    const { dxFrac } = ev.detail;
+    const { dxFrac } = ev;
     // Pan 1 full view = 100% of offset range. Drag right => show earlier data.
     const pct = displayOffsetPct - dxFrac * 100;
     displayOffsetPct = Math.max(0, Math.min(100, pct));
@@ -1108,7 +1109,7 @@
   // (wall-clock vs nominal timebase), which made `newStartNs / dt` land on
   // the wrong sample index and pushed the zoom region off to the right.
   function onCanvasZoomTo(ev) {
-    const { startFrac, endFrac } = ev.detail;
+    const { startFrac, endFrac } = ev;
     if (!(endFrac > startFrac)) return;
     const curStartNs = visible.startTimeNs || 0;
     const curSpanNs  = visible.spanNs || 0;
@@ -1150,14 +1151,14 @@
     }
   }
   // Hide offset slider in live roll mode (streaming + not paused).
-  $: offsetActive = !(isStreaming && !streamPaused) && timePerDivNs > 0;
+  const offsetActive = $derived(!(isStreaming && !streamPaused) && timePerDivNs > 0);
 
   // Dual-range slider: two handles that describe the visible window as
   // percentages of the full buffer. Derived reactively from the existing
   // (timePerDivNs, displayOffsetPct) state; writes back through setWindowPct.
-  $: dualRangeActive = totalSampleCount() > 0 && viewDtNs > 0
-                       && (timePerDivNs > 0 || streamPaused || !isStreaming);
-  $: windowStartPct = (() => {
+  const dualRangeActive = $derived(totalSampleCount() > 0 && viewDtNs > 0
+                       && (timePerDivNs > 0 || streamPaused || !isStreaming));
+  const windowStartPct = $derived.by(() => {
     const total = totalSampleCount();
     const dt = viewDtNs;
     if (total <= 0 || dt <= 0) return 0;
@@ -1166,8 +1167,8 @@
     const maxStart = Math.max(0, total - windowN);
     const startSample = (displayOffsetPct / 100) * maxStart;
     return Math.max(0, Math.min(100, (startSample / total) * 100));
-  })();
-  $: windowEndPct = (() => {
+  });
+  const windowEndPct = $derived.by(() => {
     const total = totalSampleCount();
     const dt = viewDtNs;
     if (total <= 0 || dt <= 0) return 100;
@@ -1176,7 +1177,7 @@
     const maxStart = Math.max(0, total - windowN);
     const startSample = (displayOffsetPct / 100) * maxStart;
     return Math.max(0, Math.min(100, ((startSample + windowN) / total) * 100));
-  })();
+  });
   // Set the visible window from a (startPct, endPct) pair. Auto-pauses
   // streaming on change since a narrowed window is meaningless in roll mode.
   // Uses `viewDtNs` (same dt the visible slice uses) — not effectiveSampleDtNs,
@@ -1209,14 +1210,17 @@
 
   // Custom Time/div dropdown (native <select> has an auto-select-on-release
   // bug in WebKit2GTK when the menu opens directly under the cursor).
-  let tdOpen = false;
-  let tdButton;
-  $: tdLabel = (() => {
+  let tdOpen = $state(false);
+  // `null`, not `undefined`: DisplayControls declares `tdButton` as a
+  // $bindable with a fallback, and Svelte 5 rejects binding `undefined`
+  // against a prop that has one (props_invalid_value).
+  let tdButton = $state(null);
+  const tdLabel = $derived.by(() => {
     if (timePerDivNs === 0) return 'Auto';
     const preset = TIME_DIV_PRESETS.find(p => p.ns === timePerDivNs);
     if (preset) return preset.label;
     return fmtTime(timePerDivNs);
-  })();
+  });
   function tdToggle(ev) {
     ev.stopPropagation();
     tdOpen = !tdOpen;
@@ -1232,7 +1236,7 @@
   }
 </script>
 
-<svelte:window on:click={tdDocClick} />
+<svelte:window onclick={tdDocClick} />
 
 <div class="app-layout">
   <!-- Toolbar -->
@@ -1242,20 +1246,20 @@
 
     <button class="btn" class:btn-primary={!connected && fwInstalled}
             class:btn-danger={connected}
-            on:click={handleConnect} disabled={connecting || !fwInstalled}
+            onclick={handleConnect} disabled={connecting || !fwInstalled}
             title={fwInstalled ? '' : 'Firmware not installed — click the Firmware button first'}>
       {#if connecting}Connecting...{:else if connected}Disconnect{:else}Connect{/if}
     </button>
 
     <button class="btn" class:btn-primary={!fwInstalled}
-            on:click={() => fwModalOpen = true}
+            onclick={() => fwModalOpen = true}
             title="Extract/check the scope firmware">
       {fwInstalled ? 'Firmware' : 'Firmware ✗'}
     </button>
 
     <div class="separator"></div>
 
-    <button class="btn" on:click={handleCapture}
+    <button class="btn" onclick={handleCapture}
             disabled={!connected || isStreaming || capturing}>
       {#if capturing}Capturing...{:else}Single Shot{/if}
     </button>
@@ -1269,11 +1273,11 @@
     </select>
 
     {#if isStreaming}
-      <button class="btn btn-danger" on:click={handleStopStreaming}>
+      <button class="btn btn-danger" onclick={handleStopStreaming}>
         Stop
       </button>
     {:else}
-      <button class="btn btn-streaming" on:click={handleStartStreaming}
+      <button class="btn btn-streaming" onclick={handleStartStreaming}
               disabled={!connected}>
         Run
       </button>
@@ -1342,9 +1346,9 @@
             paused={streamPaused}
             sliceStartNs={visible.startTimeNs || 0}
             getFullSamples={getFullSamplesForDecode}
-            on:decode={(ev) => {
-              decoderState = ev.detail;
-              decoderAnnotations = ev.detail.events || [];
+            ondecode={(ev) => {
+              decoderState = ev;
+              decoderAnnotations = ev.events || [];
             }}
           />
         </div>
@@ -1403,17 +1407,17 @@
           vdivMvB={vdivMvB}
           persistenceOn={persistenceOn}
           annotations={decoderAnnotations}
-          on:zoom={onCanvasZoom}
-          on:pan={onCanvasPan}
-          on:zoomBegin={onCanvasZoomBegin}
-          on:zoomTo={onCanvasZoomTo}
-          on:cursormove={(ev) => {
-            if (ev.detail.which === 1) cursor1Pct = ev.detail.pct;
-            else if (ev.detail.which === 2) cursor2Pct = ev.detail.pct;
+          onzoom={onCanvasZoom}
+          onpan={onCanvasPan}
+          onzoomBegin={onCanvasZoomBegin}
+          onzoomTo={onCanvasZoomTo}
+          oncursormove={(ev) => {
+            if (ev.which === 1) cursor1Pct = ev.pct;
+            else if (ev.which === 2) cursor2Pct = ev.pct;
           }}
-          on:ycursormove={(ev) => {
-            if (ev.detail.which === 1) yCursor1Mv = ev.detail.mv;
-            else if (ev.detail.which === 2) yCursor2Mv = ev.detail.mv;
+          onycursormove={(ev) => {
+            if (ev.which === 1) yCursor1Mv = ev.mv;
+            else if (ev.which === 2) yCursor2Mv = ev.mv;
           }}
         />
       </div>
@@ -1465,9 +1469,9 @@
   <DecoderLog {decoderState} bind:collapsed={decoderLogCollapsed} />
 
   <!-- Calibration modal (overlay) -->
-  <CalibrationModal bind:open={calModalOpen} on:close={() => calModalOpen = false} />
+  <CalibrationModal bind:open={calModalOpen} onclose={() => calModalOpen = false} />
   <FirmwareSetupModal bind:open={fwModalOpen}
-                      on:close={async () => {
+                      onclose={async () => {
                         fwModalOpen = false;
                         try {
                           const s = await FirmwareStatus();

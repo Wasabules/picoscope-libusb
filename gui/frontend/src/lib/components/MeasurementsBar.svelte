@@ -1,13 +1,15 @@
 <script>
   import { fmtMv, fmtMeas } from '../utils/format.js';
 
-  export let measA = null;
-  export let measB = null;
-  export let measM = null;
-  export let measKeys = new Set();
-  export let catalog = [];
-  export let statsADisplay = null;
-  export let statsBDisplay = null;
+  let {
+    measA = null,
+    measB = null,
+    measM = null,
+    measKeys = new Set(),
+    catalog = [],
+    statsADisplay = null,
+    statsBDisplay = null,
+  } = $props();
 </script>
 
 <div class="measurements-bar">

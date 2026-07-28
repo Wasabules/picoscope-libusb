@@ -1,18 +1,16 @@
 <script>
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     FirmwareStatus, ExtractFirmwareLive, ExtractFirmwareFromPcap, PickPcapFile
   } from '../../../wailsjs/go/main/App.js';
   import { EventsOn } from '../../../wailsjs/runtime/runtime.js';
 
-  export let open = false;
+  let { open = $bindable(false), onclose = () => {} } = $props();
 
-  const dispatch = createEventDispatcher();
-
-  let status = null;    // latest FirmwareStatus result
-  let busy = false;
-  let error = '';
-  let log = [];
+  let status = $state(null);    // latest FirmwareStatus result
+  let busy = $state(false);
+  let error = $state('');
+  let log = $state([]);
   let unsub = null;
 
   async function refresh() {
@@ -32,7 +30,7 @@
     if (open) refresh();
   });
   onDestroy(() => { if (unsub) unsub(); });
-  $: if (open) refresh();
+  $effect(() => { if (open) refresh(); });
 
   async function runLive() {
     busy = true; error = ''; log = [];
@@ -63,7 +61,7 @@
   }
 
   function close() {
-    dispatch('close');
+    onclose();
   }
 
   function fmtBytes(n) {
@@ -75,11 +73,11 @@
 </script>
 
 {#if open}
-<div class="modal-backdrop" on:click|self={close}>
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
   <div class="modal">
     <div class="modal-header">
       <h2>Firmware setup</h2>
-      <button class="icon-btn" on:click={close} title="Close">✕</button>
+      <button class="icon-btn" onclick={close} title="Close">✕</button>
     </div>
 
     <div class="modal-body">
@@ -107,13 +105,15 @@
         <div class="s-row">
           <span class="s-label">Files</span>
           <table class="files">
-            {#each ['fx2.bin','fpga.bin','waveform.bin','stream_lut.bin'] as f}
-              <tr>
-                <td>{f}</td>
-                <td>{status.files[f] ? fmtBytes(status.files[f]) : '—'}</td>
-                <td>{status.files[f] ? '✓' : '✗'}</td>
-              </tr>
-            {/each}
+            <tbody>
+              {#each ['fx2.bin','fpga.bin','waveform.bin','stream_lut.bin'] as f}
+                <tr>
+                  <td>{f}</td>
+                  <td>{status.files[f] ? fmtBytes(status.files[f]) : '—'}</td>
+                  <td>{status.files[f] ? '✓' : '✗'}</td>
+                </tr>
+              {/each}
+            </tbody>
           </table>
         </div>
       </div>
@@ -138,7 +138,7 @@
             The scope must be freshly plugged in. If you've connected it in
             this app already, unplug and replug before running.
           </p>
-          <button class="btn btn-primary" on:click={runLive}
+          <button class="btn btn-primary" onclick={runLive}
                   disabled={!status.sdkAvailable || busy}>
             {busy ? 'Extracting…' : 'Extract via SDK'}
           </button>
@@ -159,7 +159,7 @@
               tshark: {status.tsharkAvailable ? 'available' : 'missing — apt install tshark'}
             </li>
           </ul>
-          <button class="btn" on:click={runPcap}
+          <button class="btn" onclick={runPcap}
                   disabled={!status.pcapToolPath || !status.tsharkAvailable || busy}>
             {busy ? 'Extracting…' : 'Pick a pcap…'}
           </button>
@@ -182,8 +182,8 @@
     </div>
 
     <div class="modal-footer">
-      <button class="btn" on:click={refresh} disabled={busy}>Refresh</button>
-      <button class="btn btn-primary" on:click={close}
+      <button class="btn" onclick={refresh} disabled={busy}>Refresh</button>
+      <button class="btn btn-primary" onclick={close}
               disabled={!status || !status.installed}>
         {status && status.installed ? 'Done' : 'Close'}
       </button>

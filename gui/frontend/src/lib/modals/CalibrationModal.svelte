@@ -1,13 +1,11 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import {
     GetAllCalibration, ApplyCalibration,
     SetChannelA, SetChannelB, CaptureBlock
   } from '../../../wailsjs/go/main/App.js';
 
-  export let open = false;
-
-  const dispatch = createEventDispatcher();
+  let { open = $bindable(false), onclose = () => {} } = $props();
 
   const RANGES = ['50mV', '100mV', '200mV', '500mV', '1V', '2V', '5V', '10V', '20V'];
   const RANGE_MV = {
@@ -17,17 +15,17 @@
 
   // Per-range: list of {expected: mv, measured: mv} points.
   // Auto-bootstrapped with one empty row each.
-  let points = {};
+  let points = $state({});
   for (const r of RANGES) points[r] = [{ expected: null, measured: null }];
 
   // Current committed (offset, gain) per range (from the driver).
-  let current = {};
+  let current = $state({});
   for (const r of RANGES) current[r] = { offset_mv: 0, gain: 1 };
 
   // Active row being measured — for visual feedback.
-  let busyRange = null;
-  let busyIdx = -1;
-  let msg = '';
+  let busyRange = $state(null);
+  let busyIdx = $state(-1);
+  let msg = $state('');
 
   async function refreshFromDriver() {
     try {
@@ -35,14 +33,13 @@
       for (const e of rows) {
         current[e.range] = { offset_mv: e.offset_mv, gain: e.gain };
       }
-      current = current;
     } catch (e) { msg = 'Read failed: ' + e; }
   }
 
   onMount(() => {
     if (open) refreshFromDriver();
   });
-  $: if (open) refreshFromDriver();
+  $effect(() => { if (open) refreshFromDriver(); });
 
   function addPoint(range) {
     points[range] = [...points[range], { expected: null, measured: null }];
@@ -68,7 +65,6 @@
       for (const v of data.channelA) sum += v;
       const mean = sum / data.channelA.length;
       points[range][i].measured = +mean.toFixed(2);
-      points = points;  // trigger Svelte
     } catch (e) {
       msg = 'Measure failed: ' + e;
     }
@@ -110,7 +106,7 @@
     return { offset_mv: intercept, gain: 1 / slope, n };
   }
 
-  $: fits = Object.fromEntries(RANGES.map(r => [r, fitLinear(points[r])]));
+  const fits = $derived(Object.fromEntries(RANGES.map(r => [r, fitLinear(points[r])])));
 
   async function applyAll() {
     const payload = [];
@@ -158,7 +154,7 @@
     } catch (e) { msg = 'Clipboard failed: ' + e; }
   }
 
-  let fileInput;
+  let fileInput = $state();
   function pickImport() { fileInput.click(); }
   async function onImport(ev) {
     const file = ev.target.files[0];
@@ -174,7 +170,6 @@
             }));
           }
         }
-        points = points;
         msg = 'Imported ' + file.name + ' — click Apply to push to driver';
       } else if (data.fits) {
         // Only fits available — push directly
@@ -193,15 +188,15 @@
     ev.target.value = '';
   }
 
-  function close() { dispatch('close'); }
+  function close() { onclose(); }
 </script>
 
 {#if open}
-<div class="modal-backdrop" on:click={close}>
-  <div class="modal" on:click|stopPropagation>
+<div class="modal-backdrop" onclick={close}>
+  <div class="modal" onclick={(e) => e.stopPropagation()}>
     <div class="modal-header">
       <h2>Calibration</h2>
-      <button class="icon-btn" on:click={close} title="Close">✕</button>
+      <button class="icon-btn" onclick={close} title="Close">✕</button>
     </div>
 
     <div class="modal-body">
@@ -213,11 +208,11 @@
       </p>
 
       <div class="toolbar">
-        <button class="btn" on:click={exportJSON}>⬇ Export JSON</button>
-        <button class="btn" on:click={exportToClipboard}>⎘ Copy JSON</button>
-        <button class="btn" on:click={pickImport}>⬆ Import JSON</button>
-        <button class="btn btn-primary" on:click={applyAll}>✓ Apply to driver</button>
-        <input bind:this={fileInput} type="file" accept=".json" on:change={onImport}
+        <button class="btn" onclick={exportJSON}>⬇ Export JSON</button>
+        <button class="btn" onclick={exportToClipboard}>⎘ Copy JSON</button>
+        <button class="btn" onclick={pickImport}>⬆ Import JSON</button>
+        <button class="btn btn-primary" onclick={applyAll}>✓ Apply to driver</button>
+        <input bind:this={fileInput} type="file" accept=".json" onchange={onImport}
                style="display:none">
       </div>
 
@@ -255,17 +250,17 @@
                            bind:value={p.measured}>
                     <button class="mini-btn"
                             class:busy={busyRange === r && busyIdx === i}
-                            on:click={() => measure(r, i)}
+                            onclick={() => measure(r, i)}
                             title="Capture CH A mean at this range">
                       {busyRange === r && busyIdx === i ? '…' : '⏺'}
                     </button>
                     {#if points[r].length > 1}
-                      <button class="mini-btn" on:click={() => removePoint(r, i)}
+                      <button class="mini-btn" onclick={() => removePoint(r, i)}
                               title="Remove point">✕</button>
                     {/if}
                   </div>
                 {/each}
-                <button class="mini-btn" on:click={() => addPoint(r)}>+ add point</button>
+                <button class="mini-btn" onclick={() => addPoint(r)}>+ add point</button>
               </td>
               <td class="fit">
                 {#if fits[r]}

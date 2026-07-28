@@ -1,16 +1,18 @@
 <script>
-  export let label = 'Channel A';
-  export let dotColor = '#00ff88';
-  export let ranges = [];
-  export let panelOpen = false;
+  let {
+    label     = 'Channel A',
+    dotColor  = '#00ff88',
+    ranges    = [],
+    panelOpen = false,
 
-  export let enabled = false;
-  export let coupling = 'DC';
-  export let range = '5V';
-  export let offsetMv = 0;
-  export let vdivMv = 0;
+    enabled  = $bindable(false),
+    coupling = $bindable('DC'),
+    range    = $bindable('5V'),
+    offsetMv = $bindable(0),
+    vdivMv   = $bindable(0),
 
-  export let onChange = () => {};
+    onChange = () => {},
+  } = $props();
 </script>
 
 <details class="panel" open={panelOpen}>
@@ -22,21 +24,21 @@
     <div class="form-row">
       <label>
         <span class="toggle-label">
-          <input type="checkbox" bind:checked={enabled} on:change={onChange}>
+          <input type="checkbox" bind:checked={enabled} onchange={onChange}>
           Enabled
         </span>
       </label>
     </div>
     <div class="form-row">
       <label>Coupling</label>
-      <select bind:value={coupling} on:change={onChange}>
+      <select bind:value={coupling} onchange={onChange}>
         <option value="DC">DC</option>
         <option value="AC">AC</option>
       </select>
     </div>
     <div class="form-row">
       <label>Range</label>
-      <select bind:value={range} on:change={onChange}>
+      <select bind:value={range} onchange={onChange}>
         {#each ranges as r}
           <option value={r}>{r}</option>
         {/each}

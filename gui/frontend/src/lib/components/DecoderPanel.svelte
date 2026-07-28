@@ -11,35 +11,36 @@
    *
    * Events are emitted to the parent via `decode` for the bottom log.
    */
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import {
     Decode, ListDecoders, StartDecoder, StopDecoder,
   } from '../../../wailsjs/go/main/App.js';
   import { EventsOn } from '../../../wailsjs/runtime/runtime.js';
 
-  /** @type {Float32Array|number[]|null} */ export let samplesA = null;
-  /** @type {Float32Array|number[]|null} */ export let samplesB = null;
-  export let rangeMvA = 5000;
-  export let rangeMvB = 5000;
-  export let dtNs = 0;
-  export let isStreaming = false;
-  /** When streaming is paused the live session produces nothing, so we
-   *  flip to single-shot decoding of the visible slice. */
-  export let paused = false;
-  /** Absolute-time (ns) offset of sample 0 in the provided samplesA/B slice.
-   *  Used to shift single-shot event times so annotations align with the
-   *  zoomed region on the canvas. */
-  export let sliceStartNs = 0;
-
-  /** Optional callback to materialize the *full* streaming ring + dt + ranges
-   *  for a one-shot "re-analyze everything" pass. If null, the Re-analyse
-   *  button stays disabled. */
-  export let getFullSamples = null;
+  let {
+    /** @type {Float32Array|number[]|null} */ samplesA = null,
+    /** @type {Float32Array|number[]|null} */ samplesB = null,
+    rangeMvA = 5000,
+    rangeMvB = 5000,
+    dtNs = 0,
+    isStreaming = false,
+    /** When streaming is paused the live session produces nothing, so we
+     *  flip to single-shot decoding of the visible slice. */
+    paused = false,
+    /** Absolute-time (ns) offset of sample 0 in the provided samplesA/B slice.
+     *  Used to shift single-shot event times so annotations align with the
+     *  zoomed region on the canvas. */
+    sliceStartNs = 0,
+    /** Optional callback to materialize the *full* streaming ring + dt + ranges
+     *  for a one-shot "re-analyze everything" pass. If null, the Re-analyse
+     *  button stays disabled. */
+    getFullSamples = null,
+    /** Emitted whenever the decoder output changes, for the bottom log. */
+    ondecode = () => {},
+  } = $props();
 
   /** True when we should feed the streaming backend session. */
-  $: sessionActive = isStreaming && !paused;
-
-  const dispatch = createEventDispatcher();
+  const sessionActive = $derived(isStreaming && !paused);
 
   /** Max samples sent in a single-shot Decode() — IPC budget. */
   const MAX_DECODE_SAMPLES = 20_000;
@@ -51,15 +52,15 @@
   const HISTORY_MAX = 2_000;
 
   /** @type {Array<{id:string,name:string,description:string,channels:any[],config:any[]}>} */
-  let decoders = [];
-  let decoderId = '';
-  let enabled = false;
-  let config = {};
-  let channelMap = {};
+  let decoders = $state([]);
+  let decoderId = $state('');
+  let enabled = $state(false);
+  let config = $state({});
+  let channelMap = $state({});
 
   /** Accumulated events (streaming history). */
-  let history = [];
-  let lastActivityMs = 0;
+  let history = $state([]);
+  let lastActivityMs = $state(0);
   let unsubEvents;
 
   onMount(() => {
@@ -82,37 +83,42 @@
     StopDecoder().catch(() => {});
   });
 
-  $: decoder = decoders.find(d => d.id === decoderId) || null;
+  const decoder = $derived(decoders.find(d => d.id === decoderId) || null);
 
   // Reset config + map + history only when the selected protocol actually
-  // changes — never on every tick. Svelte's reactive-dep tracker would
-  // otherwise add `history` as a dep (via the dispatchState call) and
-  // re-run this block every time an event batch arrives, silently clobbering
-  // any settings the user had just typed in.
+  // changes — never on every tick. The body is wrapped in `untrack` so the
+  // effect depends on `decoder` alone: without it, the `dispatchState()` call
+  // would read `history` and make it a dependency, re-running this block on
+  // every incoming event batch and silently clobbering any settings the user
+  // had just typed in.
   let lastDecoderId = null;
-  $: if ((decoder ? decoder.id : null) !== lastDecoderId) {
-    lastDecoderId = decoder ? decoder.id : null;
-    if (decoder) {
-      const nextCfg = {};
-      for (const f of decoder.config) nextCfg[f.key] = f.default;
-      config = nextCfg;
-      const nextMap = {};
-      const avail = ['A', 'B'];
-      let idx = 0;
-      for (const ch of decoder.channels) {
-        nextMap[ch.role] = ch.required && idx < 2 ? avail[idx++] : null;
+  $effect(() => {
+    const currentId = decoder ? decoder.id : null;
+    untrack(() => {
+      if (currentId === lastDecoderId) return;
+      lastDecoderId = currentId;
+      if (decoder) {
+        const nextCfg = {};
+        for (const f of decoder.config) nextCfg[f.key] = f.default;
+        config = nextCfg;
+        const nextMap = {};
+        const avail = ['A', 'B'];
+        let idx = 0;
+        for (const ch of decoder.channels) {
+          nextMap[ch.role] = ch.required && idx < 2 ? avail[idx++] : null;
+        }
+        channelMap = nextMap;
+      } else {
+        config = {};
+        channelMap = {};
       }
-      channelMap = nextMap;
-    } else {
-      config = {};
-      channelMap = {};
-    }
-    history = [];
-    dispatchState();
-  }
+      history = [];
+      dispatchState();
+    });
+  });
 
   function dispatchState() {
-    dispatch('decode', {
+    ondecode({
       decoder, events: history, error: '',
     });
   }
@@ -127,7 +133,7 @@
    *  this scans *everything* the frontend has retained — ideal for hunting
    *  down framed packets whose SOF / EOF happened to fall on opposite sides
    *  of a streaming block boundary. */
-  let reanalyzing = false;
+  let reanalyzing = $state(false);
   async function reanalyse() {
     if (!enabled || !decoder || !getFullSamples) return;
     if (reanalyzing) return;
@@ -188,11 +194,18 @@
   }
 
   // Start / stop the session when any governing input changes.
-  $: { void [enabled, decoder, sessionActive, config, channelMap]; syncSession(); }
+  // `$state.snapshot` deep-reads config/channelMap so edits to individual
+  // fields register as dependencies — reading the bare reference would not,
+  // since mutating a property leaves the proxy identity untouched.
+  $effect(() => {
+    void [enabled, decoder, sessionActive,
+          $state.snapshot(config), $state.snapshot(channelMap)];
+    untrack(() => syncSession());
+  });
 
   /* ---------- single-shot decode (when not streaming) ---------- */
 
-  let inflight = false;
+  let inflight = $state(false);
 
   function tailPlain(arr) {
     if (!arr || arr.length === 0) return [];
@@ -233,9 +246,11 @@
 
   // Run whenever the single-shot inputs change (incl. paused=true while
   // streaming — the live ring is frozen so we decode the visible window).
-  $: { void [enabled, decoder, sessionActive, samplesA, dtNs, sliceStartNs,
-             config, channelMap];
-       if (!sessionActive) runSingleShot(); }
+  $effect(() => {
+    void [enabled, decoder, sessionActive, samplesA, dtNs, sliceStartNs,
+          $state.snapshot(config), $state.snapshot(channelMap)];
+    untrack(() => { if (!sessionActive) runSingleShot(); });
+  });
 </script>
 
 <div class="decoder-panel">
@@ -256,12 +271,12 @@
       <label><input type="checkbox" bind:checked={enabled}>
         Enable decoding</label>
       <div class="enable-actions">
-        <button class="clear-btn" on:click={reanalyse}
+        <button class="clear-btn" onclick={reanalyse}
                 disabled={!enabled || !getFullSamples || reanalyzing}
                 title="Re-run the decoder on the full rolling buffer">
           {reanalyzing ? '…' : 'Re-analyse'}
         </button>
-        <button class="clear-btn" on:click={clearHistory}
+        <button class="clear-btn" onclick={clearHistory}
                 title="Clear history">Clear</button>
       </div>
     </div>

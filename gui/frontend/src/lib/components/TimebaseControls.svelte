@@ -1,14 +1,16 @@
 <script>
-  export let timebase = 5;
-  export let timebases = [];
-  export let samples = 8064;
-  export let maxSamples = 8064;
-  export let tbLabel = '';
-  export let connected = false;
-  export let dual = false;
+  let {
+    timebase = $bindable(5),
+    samples  = $bindable(8064),
+    timebases  = [],
+    maxSamples = 8064,
+    tbLabel    = '',
+    connected  = false,
+    dual       = false,
 
-  export let onTimebaseChange = () => {};
-  export let onSamplesChange = () => {};
+    onTimebaseChange = () => {},
+    onSamplesChange  = () => {},
+  } = $props();
 </script>
 
 <details class="panel" open>
@@ -16,7 +18,7 @@
   <div class="panel-content">
     <div class="form-row">
       <label>TB</label>
-      <select bind:value={timebase} on:change={onTimebaseChange}>
+      <select bind:value={timebase} onchange={onTimebaseChange}>
         {#each timebases as tb, i}
           <option value={i}>{i} - {tb.label}</option>
         {/each}
@@ -36,7 +38,7 @@
     <div class="form-row">
       <label>Samples</label>
       <input type="number" bind:value={samples}
-             on:change={onSamplesChange}
+             onchange={onSamplesChange}
              min="64" max={maxSamples} step="64"
              disabled={!connected}>
     </div>

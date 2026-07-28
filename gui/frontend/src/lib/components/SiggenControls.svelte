@@ -1,20 +1,22 @@
 <script>
-  export let waveTypes = [];
-  export let wave = 'sine';
-  export let freq = 1000;
-  export let ampMv = 500;
-  export let offsetMv = 0;
-  export let duty = 50;
-  export let sweep = false;
-  export let stopFreq = 10000;
-  export let sweepInc = 100;
-  export let sweepDwell = 0.1;
+  let {
+    wave       = $bindable('sine'),
+    freq       = $bindable(1000),
+    ampMv      = $bindable(500),
+    offsetMv   = $bindable(0),
+    duty       = $bindable(50),
+    sweep      = $bindable(false),
+    stopFreq   = $bindable(10000),
+    sweepInc   = $bindable(100),
+    sweepDwell = $bindable(0.1),
 
-  export let connected = false;
-  export let enabled = false;
+    waveTypes = [],
+    connected = false,
+    enabled   = false,
 
-  export let onEnable = () => {};
-  export let onDisable = () => {};
+    onEnable  = () => {},
+    onDisable = () => {},
+  } = $props();
 </script>
 
 <details class="panel">
@@ -69,10 +71,10 @@
       </div>
     {/if}
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onEnable} disabled={!connected}>
+      <button class="btn btn-primary" onclick={onEnable} disabled={!connected}>
         {enabled ? 'Update' : 'Enable'}
       </button>
-      <button class="btn btn-danger" on:click={onDisable}
+      <button class="btn btn-danger" onclick={onDisable}
               disabled={!connected || !enabled}>
         Disable
       </button>

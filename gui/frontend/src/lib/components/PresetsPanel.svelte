@@ -1,13 +1,14 @@
 <script>
-  export let presets = {};
-  export let presetName = '';
-  export let selected = '';
+  let {
+    presets = {},
+    presetName = $bindable(''),
+    selected = $bindable(''),
+    onSave = () => {},
+    onLoad = () => {},
+    onDelete = () => {},
+  } = $props();
 
-  export let onSave = () => {};
-  export let onLoad = () => {};
-  export let onDelete = () => {};
-
-  $: names = Object.keys(presets);
+  const names = $derived(Object.keys(presets));
 </script>
 
 <details class="panel">
@@ -18,7 +19,7 @@
       <input type="text" bind:value={presetName} placeholder="e.g. 1kHz sine test">
     </div>
     <div class="panel-actions">
-      <button class="btn btn-primary" on:click={onSave}>Save current</button>
+      <button class="btn btn-primary" onclick={onSave}>Save current</button>
     </div>
     {#if names.length > 0}
       <div class="form-row">
@@ -31,9 +32,9 @@
         </select>
       </div>
       <div class="panel-actions">
-        <button class="btn btn-primary" on:click={onLoad}
+        <button class="btn btn-primary" onclick={onLoad}
                 disabled={!selected}>Load</button>
-        <button class="btn btn-danger" on:click={onDelete}
+        <button class="btn btn-danger" onclick={onDelete}
                 disabled={!selected}>Delete</button>
       </div>
     {/if}
