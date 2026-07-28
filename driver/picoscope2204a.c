@@ -55,6 +55,11 @@
 #define PS_RANGE_FIRST  PS_50MV
 #define PS_RANGE_COUNT  9
 
+/* Minimum run of 0x00 bytes that find_valid_segment() treats as padding rather
+ * than signal. The device pads with whole kilobytes; 256 samples pinned to the
+ * negative rail would be extreme clipping (82 us at timebase 5). */
+#define PAD_RUN_MIN     256
+
 /* Table index for `range`, or -1 if the range is outside the supported set. */
 static inline int range_index(ps_range_t range)
 {
@@ -1319,28 +1324,49 @@ static int find_valid_segment(const uint8_t *raw, int raw_len,
     const uint8_t *buf = raw + 2;
     int buf_len = raw_len - 2;
 
-    /* Only the LEADING run of zeros is padding. 0x00 is a legal sample value
-     * (negative full scale on an 8-bit ADC centred at 128), so trailing and
-     * interior zeros are real data and must never be trimmed.
+    /* The payload is always flush against the END of the transfer, preceded by
+     * a long run of 0x00 padding. Anchoring on that run — rather than on the
+     * first non-zero byte — is what makes this robust:
      *
-     * Trimming the tail — as this used to — shortened the segment, which both
-     * shifted the trigger position reported by parse_waveform_ex() and, because
-     * the dual-channel layout is B,A,B,A anchored on the end of the transfer,
-     * inverted the channel assignment whenever an odd number of trailing
-     * samples happened to sit on the negative rail.
+     *  - 0x00 is a legal sample (negative full scale on an 8-bit ADC centred on
+     *    128), so trailing and interior zeros are real data. Trimming them
+     *    shifted the trigger position and, because the dual layout is B,A,B,A
+     *    anchored on the end, inverted the channels whenever an odd number of
+     *    trailing samples sat on the rail.
      *
-     * A clipped *leading* edge remains indistinguishable from padding, but that
-     * only costs a little history: every parser anchors on the tail. */
-    int first_nz = 0;
-    while (first_nz < buf_len && buf[first_nz] == 0) first_nz++;
-
-    if (first_nz >= buf_len) {   /* nothing but padding */
-        *out_ptr = buf;
-        return buf_len;
+     *  - After a channel-count change the device does not clear its buffer, so
+     *    a single-channel transfer arrives as [stale dual capture][padding]
+     *    [fresh data]. Byte 0 is then non-zero and "skip the leading zeros"
+     *    skips nothing, splicing kilobytes of padding into the trace — measured
+     *    as 1629 railed samples out of 2000 on a 5 V capture following a dual
+     *    one, and it never recovered.
+     *
+     * Scanning back from the end for the last padding run handles both layouts.
+     * A signal genuinely pinned to the rail for PAD_RUN_MIN consecutive samples
+     * would lose its leading edge, which is a far better failure than splicing
+     * in padding. */
+    int run = 0, payload_start = -1;
+    for (int i = buf_len - 1; i >= 0; i--) {
+        if (buf[i] == 0) {
+            if (++run >= PAD_RUN_MIN) { payload_start = i + run; break; }
+        } else {
+            run = 0;
+        }
     }
 
-    *out_ptr = buf + first_nz;
-    return buf_len - first_nz;
+    if (payload_start < 0) {
+        /* No padding run: fall back to trimming a short leading zero run. */
+        payload_start = 0;
+        while (payload_start < buf_len && buf[payload_start] == 0) payload_start++;
+        if (payload_start >= buf_len) { *out_ptr = buf; return buf_len; }
+    } else if (payload_start >= buf_len) {
+        /* Transfer ends inside the padding — nothing usable. */
+        *out_ptr = buf;
+        return 0;
+    }
+
+    *out_ptr = buf + payload_start;
+    return buf_len - payload_start;
 }
 
 /* Scale [start..start+n] uint8 samples into mV float array. */

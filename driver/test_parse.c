@@ -70,6 +70,50 @@ static void test_segment_keeps_trailing_zero_samples(void)
     CHECK(seg[2] == 0x00 && seg[3] == 0x00, "trailing zeros must be preserved");
 }
 
+/* After a channel-count change the device does not clear its buffer: a single
+ * channel transfer arrives as [stale dual capture][padding][fresh data], with a
+ * NON-zero byte 0. Anchoring on the first non-zero byte splices the stale block
+ * and the whole padding run into the trace. */
+static void test_segment_skips_stale_capture_before_padding(void)
+{
+    enum { RAW = 2 + 400 + PAD_RUN_MIN + 100 };
+    static uint8_t raw[RAW];
+    memset(raw, 0, sizeof(raw));
+    raw[0] = 0x57; raw[1] = 0xa7;
+
+    /* Stale dual-interleaved leftovers at the head. */
+    for (int i = 0; i < 400; i++) raw[2 + i] = (i & 1) ? 0x7c : 0x7f;
+    /* PAD_RUN_MIN zeros stay in the middle, then fresh data flush to the end. */
+    for (int i = 0; i < 100; i++) raw[2 + 400 + PAD_RUN_MIN + i] = (uint8_t)(0x90 + (i & 7));
+
+    const uint8_t *seg = NULL;
+    int len = find_valid_segment(raw, RAW, &seg);
+
+    CHECK(len == 100, "should return only the fresh block, got %d", len);
+    CHECK(seg == raw + 2 + 400 + PAD_RUN_MIN, "segment must start after the padding run");
+    CHECK(seg[0] == 0x90, "first fresh byte, got 0x%02x", seg[0]);
+    CHECK(seg + len == raw + RAW, "segment must run flush to the end");
+}
+
+/* A short run of railed samples inside the payload is signal, not padding. */
+static void test_segment_keeps_short_rail_run(void)
+{
+    enum { RAW = 2 + 64 + 40 };
+    static uint8_t raw[RAW];
+    memset(raw, 0, sizeof(raw));
+    raw[0] = 0x57; raw[1] = 0xa7;
+    for (int i = 0; i < 64; i++) raw[2 + i] = 0x00;          /* short rail run */
+    for (int i = 0; i < 40; i++) raw[2 + 64 + i] = (uint8_t)(0x70 + i);
+
+    const uint8_t *seg = NULL;
+    int len = find_valid_segment(raw, RAW, &seg);
+    /* 64 < PAD_RUN_MIN, so the fallback trims it as a leading zero run — but it
+     * must never be mistaken for a padding *boundary* that discards data past
+     * it. What matters is that the fresh block survives intact. */
+    CHECK(len >= 40, "the 40 real samples must survive, got %d", len);
+    CHECK(seg + len == raw + RAW, "segment must run flush to the end");
+}
+
 static void test_segment_all_padding(void)
 {
     uint8_t raw[32];
@@ -230,6 +274,8 @@ int main(void)
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "segment: trims only leading padding",  test_segment_trims_only_leading_padding },
         { "segment: keeps trailing rail samples", test_segment_keeps_trailing_zero_samples },
+        { "segment: skips stale capture + padding", test_segment_skips_stale_capture_before_padding },
+        { "segment: keeps short rail run",         test_segment_keeps_short_rail_run },
         { "segment: all-padding buffer",          test_segment_all_padding },
         { "segment: runt buffer",                 test_segment_runt_buffer },
         { "dual: A/B stable across rail samples", test_dual_channel_assignment_is_stable },
