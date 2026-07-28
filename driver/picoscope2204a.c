@@ -96,6 +96,10 @@ static void ps_sleep_us(unsigned long us)
 #define TRIG_IDLE_B         0x81
 #define TRIG_IDLE_BAND      4
 
+/* Samples the device delivers after the trigger beyond what it was asked for.
+ * Measured constant across sample counts and timebases — see parse_waveform_ex. */
+#define TRIG_PIPELINE_SAMPLES 31
+
 /* Table index for `range`, or -1 if the range is outside the supported set. */
 static inline int range_index(ps_range_t range)
 {
@@ -1548,8 +1552,11 @@ static int parse_waveform_ex(const uint8_t *raw, int raw_len, int n_samples,
     if (dp < -100) dp = -100;
     if (dp >  100) dp =  100;
     int pre_wanted = (n_samples * (100 - dp)) / 200;
-    /* Start of extraction in the valid region. */
-    int start = (valid_len - post_captured) - pre_wanted;
+    /* Start of extraction in the valid region, anchored on where the trigger
+     * actually is rather than where it was requested. */
+    int trigger_at = valid_len - post_captured - TRIG_PIPELINE_SAMPLES;
+    if (trigger_at < 0) trigger_at = 0;
+    int start = trigger_at - pre_wanted;
     if (start < 0) start = 0;
     if (start + n_samples > valid_len) start = valid_len - n_samples;
     if (start < 0) start = 0;
@@ -1641,6 +1648,7 @@ static void apply_res_enhancement(ps2204a_device_t *dev, float *buf, int n)
  *
  * Returns samples-per-channel written. Either out_a or out_b may be NULL. */
 static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
+                               int post_captured, int delay_pct,
                                float range_a_mv, float range_b_mv,
                                float *out_a, float *out_b,
                                uint32_t *clip_a, uint32_t *clip_b)
@@ -1650,16 +1658,31 @@ static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
     if (valid_len < 4) return 0;
 
     /* Two bytes per sample pair (B then A). Take the last 2*n bytes. */
-    int pair_bytes = 2 * n_samples;
-    if (pair_bytes > valid_len) {
-        n_samples = valid_len / 2;
-        pair_bytes = 2 * n_samples;
-    }
     /* Pairs are anchored on the END of the transfer: the final byte of the
-     * buffer is always the A sample of the last pair. Deriving `tail` from the
-     * end rather than from the start of the payload keeps the B/A assignment
-     * independent of how much padding preceded the data. */
-    const uint8_t *tail = (valid + valid_len) - pair_bytes;
+     * buffer is always the A sample of the last pair. Working in pair units
+     * measured back from the end keeps the B/A assignment independent of both
+     * the padding ahead of the data and of where the window starts. */
+    int pairs_avail = valid_len / 2;
+    if (n_samples > pairs_avail) n_samples = pairs_avail;
+    const uint8_t *grid = (valid + valid_len) - 2 * pairs_avail;
+
+    int start_pair;
+    if (post_captured > 0) {
+        /* Same anchoring as the single-channel path: the event sits
+         * TRIG_PIPELINE_SAMPLES earlier than the requested post-trigger count,
+         * and delay_pct decides how much of the window precedes it. */
+        int dp = delay_pct;
+        if (dp < -100) dp = -100;
+        if (dp >  100) dp =  100;
+        int trig_pair = pairs_avail - post_captured - TRIG_PIPELINE_SAMPLES;
+        start_pair = trig_pair - (n_samples * (100 - dp)) / 200;
+    } else {
+        start_pair = pairs_avail - n_samples;   /* untriggered: take the tail */
+    }
+    if (start_pair > pairs_avail - n_samples) start_pair = pairs_avail - n_samples;
+    if (start_pair < 0) start_pair = 0;
+
+    const uint8_t *tail = grid + 2 * start_pair;
 
     float scale_a = range_a_mv / ADC_HALF_RANGE;
     float scale_b = range_b_mv / ADC_HALF_RANGE;
@@ -1951,7 +1974,7 @@ static void *fast_streaming_thread(void *arg)
         /* Parse waveform(s) */
         uint32_t clip_a = 0, clip_b = 0;
         int got = both
-            ? parse_waveform_dual(raw, n, block_size,
+            ? parse_waveform_dual(raw, n, block_size, 0, 0,
                                   range_a_mv, range_b_mv, tmp_a, tmp_b,
                                   &clip_a, &clip_b)
             : parse_waveform(raw, n, block_size,
@@ -3348,7 +3371,11 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     uint32_t clip_a = 0, clip_b = 0;
 
     if (both) {
-        got = parse_waveform_dual(raw, raw_n, n,
+        int post = dev->trigger_armed
+                   ? (n * (100 + dev->trigger_delay_pct)) / 100
+                   : 0;
+        int dp = dev->trigger_armed ? dev->trigger_delay_pct : 0;
+        got = parse_waveform_dual(raw, raw_n, n, post, dp,
                                   range_a_mv, range_b_mv, buf_a, buf_b,
                                   &clip_a, &clip_b);
     } else if (dev->ch[0].enabled && buf_a) {

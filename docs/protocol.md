@@ -238,6 +238,30 @@ idle = 0x7c (channel A) | 0x81 (channel B)
 
 `cmd2[21]` = `0x09` rising, `0x12` falling.
 
+### Trigger position in the returned block
+
+The device overshoots the post-trigger sample count it is given: the event
+lands **31 samples earlier** than `valid_len − post_captured`. Measured
+against a square-wave edge, the overshoot is constant at 31 ± 2 samples
+across sample counts 1000–4000 and timebases 3, 5 and 7 — a fixed detection
+pipeline rather than anything that scales. The parser anchors on that
+corrected position, in pair units for dual-channel captures.
+
+Measure it with a square wave, not a sine: a slow sine costs the crossing
+detector part of an edge to arm, which shows up as tens of samples of
+apparent offset belonging to the measurement rather than the device. The
+same experiment read 84/143/239 samples on a sine and a flat 31 on a square.
+
+With the correction, `delay_pct` lands where it says:
+
+| delay_pct | requested | measured (single) | measured (dual) |
+|-----------|-----------|-------------------|-----------------|
+| −80 | 90 % | 89.9 % | — |
+| −50 | 75 % | 75.1 % | 74.9 % |
+| 0   | 50 % | 50.1 % | 50.0 % |
+| +50 | 25 % | 25.0 % | 25.0 % |
+| +80 | 10 % | 10.1 % | — |
+
 `02 07 06` is the data-commit signal sent identically in block and
 streaming.
 

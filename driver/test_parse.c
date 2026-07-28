@@ -159,7 +159,7 @@ static void test_dual_channel_assignment_is_stable(void)
 
         float a[PAIRS], b[PAIRS];
         uint32_t clip_a = 0, clip_b = 0;
-        int got = parse_waveform_dual(raw, raw_len, PAIRS, 5000.0f, 5000.0f,
+        int got = parse_waveform_dual(raw, raw_len, PAIRS, 0, 0, 5000.0f, 5000.0f,
                                       a, b, &clip_a, &clip_b);
         /* Byte 0x00 is negative full scale, so the railed samples we planted
          * must be reported as clipped rather than silently absorbed. */
