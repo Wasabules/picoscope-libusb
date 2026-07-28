@@ -10,12 +10,15 @@
     sweepInc   = $bindable(100),
     sweepDwell = $bindable(0.1),
 
+    arbPoints = $bindable(''),
+
     waveTypes = [],
     connected = false,
     enabled   = false,
 
-    onEnable  = () => {},
-    onDisable = () => {},
+    onEnable    = () => {},
+    onDisable   = () => {},
+    onArbitrary = () => {},
   } = $props();
 </script>
 
@@ -28,6 +31,7 @@
         {#each waveTypes as w}
           <option value={w}>{w}</option>
         {/each}
+        <option value="arbitrary">arbitrary</option>
       </select>
     </div>
     <div class="form-row">
@@ -42,6 +46,19 @@
       <label>Offset mV</label>
       <input type="number" bind:value={offsetMv} min="-2000" max="2000" step="50">
     </div>
+    {#if wave === 'arbitrary'}
+      <div class="form-row">
+        <label>Points</label>
+        <textarea bind:value={arbPoints} rows="3"
+                  placeholder="comma/space separated, -1..+1 (2 to 4096 values)"
+                  title="Normalised sample values. The device is a true AWG: the table is resampled into its 8192-byte LUT."
+        ></textarea>
+      </div>
+      <div class="panel-actions">
+        <button class="btn btn-primary" onclick={onArbitrary}
+                disabled={!connected}>Upload waveform</button>
+      </div>
+    {/if}
     {#if wave === 'square'}
       <div class="form-row">
         <label>Duty %</label>

@@ -146,4 +146,118 @@ static inline ps_status_t wrap_set_sdk_stream_auto_stop(ps2204a_device_t *dev,
     return ps2204a_set_sdk_stream_auto_stop(dev, (uint64_t)max_samples);
 }
 
+/* ---- resolution enhancement ---- */
+static inline ps_status_t wrap_set_resolution_enhancement(ps2204a_device_t *dev,
+                                                          int extra_bits) {
+    return ps2204a_set_resolution_enhancement(dev, extra_bits);
+}
+
+/* ---- overflow ---- */
+static inline ps_status_t wrap_get_last_overflow(ps2204a_device_t *dev,
+                                                 unsigned int *clipped_a,
+                                                 unsigned int *clipped_b,
+                                                 unsigned int *total) {
+    ps_overflow_t ov = {0};
+    ps_status_t st = ps2204a_get_last_overflow(dev, &ov);
+    if (st != PS_OK) return st;
+    if (clipped_a) *clipped_a = ov.clipped_a;
+    if (clipped_b) *clipped_b = ov.clipped_b;
+    if (total)     *total     = ov.total;
+    return PS_OK;
+}
+
+/* ---- equivalent-time sampling ---- */
+static inline ps_status_t wrap_set_ets(ps2204a_device_t *dev, int mode,
+                                       int interleaves, int cycles,
+                                       int *out_interval_ps) {
+    uint32_t ips = 0;
+    ps_status_t st = ps2204a_set_ets(dev, (ps_ets_mode_t)mode,
+                                     interleaves, cycles, &ips);
+    if (out_interval_ps) *out_interval_ps = (int)ips;
+    return st;
+}
+
+static inline ps_status_t wrap_disable_ets(ps2204a_device_t *dev) {
+    return ps2204a_disable_ets(dev);
+}
+
+static inline ps_status_t wrap_capture_ets(ps2204a_device_t *dev, int n_samples,
+                                           float *buf_a, float *buf_b,
+                                           int out_cap, int *actual,
+                                           int *interval_ps) {
+    return ps2204a_capture_ets(dev, n_samples, buf_a, buf_b, out_cap,
+                               actual, interval_ps);
+}
+
+/* ---- advanced triggers ---- */
+static inline ps_status_t wrap_set_trigger_ex(ps2204a_device_t *dev, int source,
+                                              float threshold_mv, int dir,
+                                              float delay_pct, int auto_ms,
+                                              int hysteresis) {
+    return ps2204a_set_trigger_ex(dev, (ps_channel_t)source, threshold_mv,
+                                  (ps_trigger_dir_t)dir, delay_pct, auto_ms,
+                                  hysteresis);
+}
+
+static inline ps_status_t wrap_set_trigger_window(ps2204a_device_t *dev, int source,
+                                                  float lower_mv, float upper_mv,
+                                                  int dir, float delay_pct,
+                                                  int auto_ms) {
+    return ps2204a_set_trigger_window(dev, (ps_channel_t)source, lower_mv,
+                                      upper_mv, (ps_trigger_dir_t)dir,
+                                      delay_pct, auto_ms);
+}
+
+/* ---- arbitrary waveform ---- */
+static inline ps_status_t wrap_set_siggen_arbitrary(ps2204a_device_t *dev,
+                                                    const short *lut, int lut_n,
+                                                    float frequency_hz,
+                                                    unsigned int pkpk_uv) {
+    return ps2204a_set_siggen_arbitrary(dev, (const int16_t *)lut, lut_n,
+                                        frequency_hz, (uint32_t)pkpk_uv);
+}
+
+static inline ps_status_t wrap_set_trigger_pwq(ps2204a_device_t *dev, int source,
+                                               float threshold_mv, int dir,
+                                               int lower_ns, int upper_ns,
+                                               float delay_pct, int auto_ms) {
+    return ps2204a_set_trigger_pwq(dev, (ps_channel_t)source, threshold_mv,
+                                   (ps_trigger_dir_t)dir, lower_ns, upper_ns,
+                                   delay_pct, auto_ms);
+}
+
+/* ---- aggregated streaming ---- */
+static inline ps_status_t wrap_get_streaming_aggregated(ps2204a_device_t *dev,
+                                                        float *min_a, float *max_a,
+                                                        float *min_b, float *max_b,
+                                                        int n_buckets, int span,
+                                                        int *actual) {
+    return ps2204a_get_streaming_aggregated(dev, min_a, max_a, min_b, max_b,
+                                            n_buckets, span, actual);
+}
+
+/* ---- EEPROM calibration ---- */
+static inline ps_status_t wrap_get_eeprom_cal(ps2204a_device_t *dev,
+                                              int *valid, float *offset_mv,
+                                              float *gain_a, float *gain_b) {
+    ps_cal_table_t cal;
+    ps_status_t st = ps2204a_get_eeprom_calibration(dev, &cal);
+    if (st != PS_OK) return st;
+    if (valid) *valid = cal.valid ? 1 : 0;
+    for (int r = 0; r < PS2204A_NUM_RANGES; r++) {
+        if (offset_mv) offset_mv[r] = cal.offset_mv[r];
+        if (gain_a)    gain_a[r]    = cal.gain[0][r];
+        if (gain_b)    gain_b[r]    = cal.gain[1][r];
+    }
+    return PS_OK;
+}
+
+static inline ps_status_t wrap_use_eeprom_cal(ps2204a_device_t *dev, int enable) {
+    return ps2204a_use_eeprom_calibration(dev, enable != 0);
+}
+
+static inline int wrap_eeprom_cal_active(ps2204a_device_t *dev) {
+    return ps2204a_eeprom_calibration_active(dev) ? 1 : 0;
+}
+
 #endif // PS_CGO_WRAPPERS_H

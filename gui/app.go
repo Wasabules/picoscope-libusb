@@ -48,6 +48,12 @@ type App struct {
 	// Streaming protocol decoder (optional). Mutated from the streaming
 	// goroutine; gated by `a.mu` like the rest of `App`.
 	decSession *decoder.Session
+
+	// Acquisition options that live in the driver but need mirroring here so
+	// the frontend can read them back without another round trip.
+	resExtraBits  int // 0..4, resolution enhancement
+	etsMode       int // 0 = off, 1 = fast, 2 = slow
+	etsIntervalPs int // effective sample interval while ETS is armed
 }
 
 func NewApp() *App {

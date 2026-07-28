@@ -9,6 +9,7 @@
     fftOn         = $bindable(false),
     measMenuOpen  = $bindable(false),
     measKeys      = $bindable(new Set()),
+    resBits       = $bindable(0),
     statsEnabled  = false,
     catalog       = [],
     measDefault   = [],
@@ -17,6 +18,7 @@
     connected    = false,
     isStreaming  = false,
 
+    onResBits       = () => {},
     onToggleStats   = () => {},
     onToggleMeasKey = () => {},
     onExportCSV     = () => {},
@@ -51,6 +53,16 @@
   <button class="ctl-btn" class:active={persistenceOn}
           onclick={() => persistenceOn = !persistenceOn}
           title="Phosphor-like overlay">Persist</button>
+
+  <span class="ctl-label">Res</span>
+  <select class="select-inline" bind:value={resBits} onchange={onResBits}
+          title="Resolution enhancement: averages 4^n neighbouring samples. Each step halves the noise, trading bandwidth for vertical resolution.">
+    <option value={0}>8 bit</option>
+    <option value={1}>9 bit</option>
+    <option value={2}>10 bit</option>
+    <option value={3}>11 bit</option>
+    <option value={4}>12 bit</option>
+  </select>
 
   <span class="ctl-label">Avg</span>
   <select class="select-inline" bind:value={avgN}>

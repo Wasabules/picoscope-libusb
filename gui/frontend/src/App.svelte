@@ -21,6 +21,7 @@
   import DiagnosticsPanel from './lib/components/DiagnosticsPanel.svelte';
   import DisplayControls from './lib/components/DisplayControls.svelte';
   import AnalysisControls from './lib/components/AnalysisControls.svelte';
+  import EtsPanel from './lib/components/EtsPanel.svelte';
   import CalibrationModal from './lib/modals/CalibrationModal.svelte';
   import FirmwareSetupModal from './lib/modals/FirmwareSetupModal.svelte';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
@@ -36,7 +37,11 @@
     CalibrateDCOffset, SetRangeCalibration,
     ComputeMeasurements,
     ExportCSV, ExportPNG,
-    FirmwareStatus
+    FirmwareStatus,
+    SetResolutionEnhancement, GetLastOverflow,
+    SetEts, DisableEts, CaptureEts,
+    SetTriggerEx, SetTriggerWindow, SetTriggerPwq,
+    SetSiggenArbitrary
   } from '../wailsjs/go/main/App.js';
 
   // Connection state
@@ -69,6 +74,12 @@
   let triggerThreshold = $state(0);
   let triggerDirection = $state('rising');
   let triggerAutoMs = $state(5000);
+  let triggerMode = $state('edge');          // edge | window | pulse
+  let triggerHysteresis = $state(0);
+  let triggerWindowLower = $state(-100);
+  let triggerWindowUpper = $state(100);
+  let triggerPulseLowerNs = $state(0);
+  let triggerPulseUpperNs = $state(0);
 
   // Signal generator (fixed freq + extended sweep/offset/duty options)
   let siggenEnabled = $state(false);
@@ -81,6 +92,7 @@
   let siggenStopFreq = $state(5000);
   let siggenSweepInc = $state(100);
   let siggenSweepDwell = $state(0.05);
+  let siggenArbPoints = $state('');
 
   // Waveform data (last single-shot capture)
   let waveformData = $state.raw(null);
@@ -134,6 +146,15 @@
   let vdivMvB = $state(0);
   // FFT + averaging toggles (Phase 2)
   let fftOn = $state(false);
+  let resBits = $state(0);                   // resolution enhancement, 0..4
+  let overflow = $state(null);               // last capture's rail counts
+  let etsMode = $state('off');
+  let etsInterleaves = $state(0);
+  let etsCycles = $state(0);
+  let etsSamples = $state(500);
+  let etsIntervalPs = $state(0);
+  let etsBusy = $state(false);
+  let etsLastCount = $state(0);
   let avgN = $state(1);              // 1 | 4 | 16 | 64
   let persistenceOn = $state(false);
 
@@ -333,11 +354,79 @@
   async function updateTrigger() {
     if (!connected) return;
     try {
-      if (triggerEnabled) {
-        await SetTrigger(triggerSource, triggerThreshold, triggerDirection, 0, triggerAutoMs);
+      if (!triggerEnabled) { await DisableTrigger(); return; }
+      if (triggerMode === 'window') {
+        await SetTriggerWindow(triggerSource, triggerWindowLower, triggerWindowUpper,
+                               triggerDirection, 0, triggerAutoMs);
+      } else if (triggerMode === 'pulse') {
+        await SetTriggerPwq(triggerSource, triggerThreshold, triggerDirection,
+                            triggerPulseLowerNs, triggerPulseUpperNs, 0, triggerAutoMs);
+      } else if (triggerHysteresis > 0) {
+        await SetTriggerEx(triggerSource, triggerThreshold, triggerDirection,
+                           0, triggerAutoMs, triggerHysteresis);
       } else {
-        await DisableTrigger();
+        await SetTrigger(triggerSource, triggerThreshold, triggerDirection, 0, triggerAutoMs);
       }
+    } catch (e) { showError(String(e)); }
+  }
+
+  async function applyResBits() {
+    if (!connected) return;
+    try { await SetResolutionEnhancement(Number(resBits)); }
+    catch (e) { showError(String(e)); }
+  }
+
+  async function refreshOverflow() {
+    if (!connected) return;
+    try { overflow = await GetLastOverflow(); }
+    catch (e) { /* non-fatal: the badge simply stays as it was */ }
+  }
+
+  async function applyEts() {
+    if (!connected) return;
+    try {
+      if (etsMode === 'off') {
+        await DisableEts();
+        etsIntervalPs = 0;
+      } else {
+        etsIntervalPs = await SetEts(etsMode === 'slow' ? 2 : 1,
+                                     Number(etsInterleaves), Number(etsCycles));
+      }
+    } catch (e) { showError(String(e)); }
+  }
+
+  async function captureEts() {
+    if (!connected || etsMode === 'off') return;
+    etsBusy = true;
+    try {
+      const r = await CaptureEts(Number(etsSamples));
+      etsLastCount = r.numSamples;
+      etsIntervalPs = r.intervalPs || etsIntervalPs;
+      // Feed the normal display path: ETS output is a plain trace whose
+      // sample interval is the ETS one, not the timebase.
+      waveformData = {
+        channelA: r.channelA || [],
+        channelB: r.channelB || [],
+        numSamples: r.numSamples,
+        timebase: timebase,
+        timebaseNs: (r.intervalPs || 1000) / 1000,
+        rangeMvA: RANGE_MV[chARange] || 5000,
+        rangeMvB: RANGE_MV[chBRange] || 5000,
+      };
+      await refreshOverflow();
+    } catch (e) { showError(String(e)); }
+    etsBusy = false;
+  }
+
+  async function uploadArbitrary() {
+    if (!connected) return;
+    const pts = siggenArbPoints.split(/[\s,;]+/).filter(t => t.length)
+                               .map(Number).filter(v => Number.isFinite(v));
+    if (pts.length < 2) { showError('Need at least 2 numeric points'); return; }
+    if (pts.length > 4096) { showError('At most 4096 points'); return; }
+    try {
+      await SetSiggenArbitrary(pts, Number(siggenFreq), Number(siggenAmpMv));
+      siggenEnabled = true;
     } catch (e) { showError(String(e)); }
   }
 
@@ -1313,7 +1402,26 @@
         bind:threshold={triggerThreshold}
         bind:direction={triggerDirection}
         bind:autoMs={triggerAutoMs}
+        bind:mode={triggerMode}
+        bind:hysteresis={triggerHysteresis}
+        bind:windowLower={triggerWindowLower}
+        bind:windowUpper={triggerWindowUpper}
+        bind:pulseLowerNs={triggerPulseLowerNs}
+        bind:pulseUpperNs={triggerPulseUpperNs}
         onChange={updateTrigger} />
+
+      <!-- Equivalent-time sampling -->
+      <EtsPanel
+        bind:mode={etsMode}
+        bind:interleaves={etsInterleaves}
+        bind:cycles={etsCycles}
+        bind:samples={etsSamples}
+        intervalPs={etsIntervalPs}
+        busy={etsBusy}
+        lastCount={etsLastCount}
+        {connected}
+        onApply={applyEts}
+        onCapture={captureEts} />
 
       <!-- Signal Generator -->
       <SiggenControls
@@ -1327,10 +1435,12 @@
         bind:stopFreq={siggenStopFreq}
         bind:sweepInc={siggenSweepInc}
         bind:sweepDwell={siggenSweepDwell}
+        bind:arbPoints={siggenArbPoints}
         {connected}
         enabled={siggenEnabled}
         onEnable={handleSiggenOn}
-        onDisable={handleSiggenOff} />
+        onDisable={handleSiggenOff}
+        onArbitrary={uploadArbitrary} />
 
       <!-- Protocol Decoder -->
       <details class="panel">
@@ -1448,6 +1558,8 @@
         bind:mathOp bind:cursorsOn bind:yCursorsOn bind:xyMode
         bind:persistenceOn bind:avgN bind:fftOn
         bind:measMenuOpen bind:measKeys
+        bind:resBits
+        onResBits={applyResBits}
         statsEnabled={statsEnabled}
         catalog={MEAS_CATALOG}
         measDefault={MEAS_DEFAULT}
@@ -1480,7 +1592,7 @@
                       }} />
 
   <StatusBar {connected} {serial} {calDate} {isStreaming} {streamStats}
-             {waveformData} {timebases} />
+             {waveformData} {timebases} {overflow} />
 </div>
 
 <ErrorToast message={errorMsg} />
