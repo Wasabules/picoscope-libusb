@@ -18,7 +18,7 @@ TEST_SRC = test_driver.c
 UNIT = test_parse
 UNIT_SRC = test_parse.c
 
-.PHONY: all clean test unit
+.PHONY: all clean test unit strict
 
 all: $(LIB) $(LIB_A) $(TEST) $(UNIT)
 
@@ -47,6 +47,14 @@ $(UNIT): $(UNIT_SRC) $(LIB_SRC) $(LIB_HDR)
 
 unit: $(UNIT)
 	./$(UNIT)
+
+# The Android build pins C_EXTENSIONS OFF, so the driver must compile as
+# strict ISO C11 — no GNU-only prototypes sneaking in via gnu11.
+strict:
+	$(CC) -c -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter \
+	    -Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers \
+	    -pthread $(LIB_SRC) -o /dev/null
+	@echo "strict C11: clean"
 
 clean:
 	rm -f $(LIB) $(LIB_A) $(LIB_OBJ) $(TEST) $(UNIT)

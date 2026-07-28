@@ -19,6 +19,14 @@
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
+
+/* M_PI is an X/Open extension, not ISO C, so a strict -std=c11 build does not
+ * get it from <math.h>. Define it rather than depend on a feature-test macro
+ * the embedder controls. */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -26,6 +34,26 @@
 #else
 #define PS_LOG(fmt, ...) fprintf(stderr, "[ps2204a] " fmt "\n", ##__VA_ARGS__)
 #endif
+
+/* Sleep helper.
+ *
+ * ps_sleep_us() was removed from POSIX.1-2008 and glibc only declares it when a
+ * feature-test macro is set, so a strict -std=c11 build silently loses its
+ * prototype and falls back to an implicit int return. nanosleep() is the
+ * current interface and needs no such macro.
+ *
+ * Retrying on EINTR also keeps the delay honest: a signal landing mid-sleep
+ * truncates ps_sleep_us() without telling anyone, which on the timing-sensitive
+ * capture paths below would shorten a settle window rather than lengthen it. */
+static void ps_sleep_us(unsigned long us)
+{
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(us / 1000000UL);
+    ts.tv_nsec = (long)(us % 1000000UL) * 1000L;
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+        /* `ts` now holds the remaining time; go round again. */
+    }
+}
 
 /* ========================================================================
  * Constants
@@ -811,7 +839,7 @@ static void send_stream_stop(ps2204a_device_t *dev)
         0x02, 0x85, 0x04, 0x99, 0x00, 0x00, 0x00, 0x0a
     };
     send_cmd(dev, stop1, sizeof(stop1));
-    usleep(10000);
+    ps_sleep_us(10000);
     send_cmd(dev, stop2, sizeof(stop2));
 }
 
@@ -831,7 +859,7 @@ static ps_status_t upload_fx2(ps2204a_device_t *dev)
         printf("  [FX2] Halt failed: %s\n", libusb_error_name(r));
         return PS_ERROR_FW;
     }
-    usleep(10000);
+    ps_sleep_us(10000);
 
     /* Parse and upload chunks from firmware data loaded at open() */
     const uint8_t *fx2 = dev->fw.fx2;
@@ -864,7 +892,7 @@ static ps_status_t upload_fx2(ps2204a_device_t *dev)
         }
         offset += len;
         chunks_sent++;
-        usleep(1000);
+        ps_sleep_us(1000);
     }
     printf("  [FX2] %d chunks uploaded\n", chunks_sent);
 
@@ -887,11 +915,11 @@ static ps_status_t fx2_reenumerate(ps2204a_device_t *dev)
     libusb_close(dev->handle);
     dev->handle = NULL;
 
-    usleep(500000); /* 500ms for USB disconnect/reconnect */
+    ps_sleep_us(500000); /* 500ms for USB disconnect/reconnect */
 
     /* Find device again (may have new address) */
     for (int attempt = 0; attempt < 20; attempt++) {
-        usleep(300000);
+        ps_sleep_us(300000);
         dev->handle = libusb_open_device_with_vid_pid(dev->ctx,
                                                        PICO_VID, PICO_PID);
         if (dev->handle) {
@@ -930,7 +958,7 @@ static ps_status_t init_adc(ps2204a_device_t *dev)
         0x81, 0x03, 0xb5, 0xff, 0xf8
     };
     send_cmd(dev, adc1, sizeof(adc1));
-    usleep(50000);
+    ps_sleep_us(50000);
 
     /* ADC init sequence 2 */
     static const uint8_t adc2[] = {
@@ -941,7 +969,7 @@ static ps_status_t init_adc(ps2204a_device_t *dev)
         0x81, 0x03, 0xb0, 0xff, 0x08, 0x0c, 0x03, 0x0a, 0x00, 0x01
     };
     send_cmd(dev, adc2, sizeof(adc2));
-    usleep(100000);
+    ps_sleep_us(100000);
 
     /* Wait for ACK */
     int n = read_resp(dev, resp, CMD_SIZE, 1000);
@@ -974,14 +1002,14 @@ static ps_status_t pre_fpga_config(ps2204a_device_t *dev)
         0x02, 0x02, 0x0c, 0xe5,
     };
     send_cmd(dev, reg_cmd, sizeof(reg_cmd));
-    usleep(50000);
+    ps_sleep_us(50000);
     read_resp(dev, resp, CMD_SIZE, 500);
 
     /* Single byte command (NOT padded to 64) */
     uint8_t one = 0x01;
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, &one, 1,
                          &transferred, TIMEOUT_CMD);
-    usleep(50000);
+    ps_sleep_us(50000);
     read_resp(dev, resp, CMD_SIZE, 500);
 
     /* Initial PGA/range config (20V) */
@@ -995,7 +1023,7 @@ static ps_status_t pre_fpga_config(ps2204a_device_t *dev)
         0x02, 0x81, 0x03, 0xb2, 0xff, 0x08
     };
     send_cmd(dev, adc_reg, sizeof(adc_reg));
-    usleep(50000);
+    ps_sleep_us(50000);
 
     return PS_OK;
 }
@@ -1012,7 +1040,7 @@ static ps_status_t upload_fpga(ps2204a_device_t *dev)
     static const uint8_t fpga_cmd[] = {0x04, 0x00, 0x95, 0x02, 0x00};
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, (uint8_t *)fpga_cmd,
                          sizeof(fpga_cmd), &transferred, TIMEOUT_CMD);
-    usleep(50000);
+    ps_sleep_us(50000);
 
     /* Upload FPGA firmware in 32KB chunks on EP 0x06 */
     const uint8_t *fpga = dev->fw.fpga;
@@ -1040,7 +1068,7 @@ static ps_status_t upload_fpga(ps2204a_device_t *dev)
     }
     printf(" Done!\n");
 
-    usleep(100000);
+    ps_sleep_us(100000);
     return PS_OK;
 }
 
@@ -1058,7 +1086,7 @@ static ps_status_t post_fpga_config(ps2204a_device_t *dev)
         0x81, 0x03, 0xb2, 0x00, 0x08
     };
     send_cmd(dev, cfg1, sizeof(cfg1));
-    usleep(100000);
+    ps_sleep_us(100000);
 
     /* Flush 3x with 300ms timeout */
     for (int i = 0; i < 3; i++) {
@@ -1071,7 +1099,7 @@ static ps_status_t post_fpga_config(ps2204a_device_t *dev)
         0x05, 0x04, 0x8f, 0x00, 0x10
     };
     send_cmd(dev, cfg2, sizeof(cfg2));
-    usleep(300000);
+    ps_sleep_us(300000);
 
     /* Wait for CAAC (0xCA 0xAC) */
     bool caac = false;
@@ -1189,7 +1217,7 @@ static ps_status_t setup_channels(ps2204a_device_t *dev)
     }
 
     /* Drain ACKs before channel B */
-    usleep(100000);
+    ps_sleep_us(100000);
     for (int i = 0; i < 5; i++) {
         if (read_resp(dev, resp, CMD_SIZE, 100) <= 0) break;
     }
@@ -1226,7 +1254,7 @@ static ps_status_t setup_channels(ps2204a_device_t *dev)
 
     /* Extra follow-up */
     send_cmd(dev, follow_up, sizeof(follow_up));
-    usleep(100000);
+    ps_sleep_us(100000);
 
     /* Drain all pending ACKs */
     for (int i = 0; i < 10; i++) {
@@ -1236,7 +1264,7 @@ static ps_status_t setup_channels(ps2204a_device_t *dev)
     /* Check status */
     static const uint8_t status_cmd[] = {0x02, 0x01, 0x01, 0x80};
     send_cmd(dev, status_cmd, sizeof(status_cmd));
-    usleep(30000);
+    ps_sleep_us(30000);
     int n = read_resp(dev, resp, CMD_SIZE, 500);
     if (n > 0) {
         printf("  [CH] Status: 0x%02x\n", resp[0]);
@@ -1258,12 +1286,12 @@ static void read_device_info(ps2204a_device_t *dev)
     for (int a = 0; a < 4; a++) {
         uint8_t info_req[] = {0x02, 0x83, 0x02, 0x50, addrs[a]};
         send_cmd(dev, info_req, sizeof(info_req));
-        usleep(20000);
+        ps_sleep_us(20000);
         read_resp(dev, resp, CMD_SIZE, TIMEOUT_CMD); /* ACK */
 
         uint8_t info_get[] = {0x02, 0x03, 0x02, 0x50, 0x40};
         send_cmd(dev, info_get, sizeof(info_get));
-        usleep(30000);
+        ps_sleep_us(30000);
         int n = read_resp(dev, resp, CMD_SIZE, 500);
 
         /* Stash the raw EEPROM bytes for downstream calibration work. */
@@ -1640,7 +1668,7 @@ static int poll_status(ps2204a_device_t *dev, int timeout_ms)
             if (last_status == 0x3b) return 0x3b; /* Ready */
             if (last_status == 0x7b) return 0x7b; /* Error */
         }
-        usleep(20000);
+        ps_sleep_us(20000);
     }
     return last_status;
 }
@@ -1704,17 +1732,14 @@ static int fast_block_capture(ps2204a_device_t *dev,
      * avoids filling the FX2 response queue with 0x33 ACKs. Margin = 1 ms
      * so we re-enter polling slightly before the device transitions to 0x3b. */
     if (expected_us > 1500) {
-        struct timespec ts;
-        ts.tv_sec  = (expected_us - 1000) / 1000000;
-        ts.tv_nsec = ((expected_us - 1000) % 1000000) * 1000L;
-        nanosleep(&ts, NULL);
+        ps_sleep_us((unsigned long)(expected_us - 1000));
     }
     if (timing) t_after_sleep = mono_us();
 
     /* Poll status until 0x3b (ready).
      * The FX2 queues responses on EP 0x81: ACKs from cmd1/cmd2 arrive first,
      * then status responses from poll commands. We read and discard non-status
-     * responses. usleep(500) between iterations prevents overwhelming the FX2
+     * responses. ps_sleep_us(500) between iterations prevents overwhelming the FX2
      * (Python's PyUSB overhead provides ~1ms natural pacing). */
     static const uint8_t poll[] = {0x02, 0x01, 0x01, 0x80,
                                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -1876,7 +1901,7 @@ static void *fast_streaming_thread(void *arg)
             libusb_clear_halt(dev->handle, EP_RESP_IN);
             libusb_clear_halt(dev->handle, EP_DATA_IN);
             flush_buffers(dev);
-            usleep(50000);
+            ps_sleep_us(50000);
             if (consecutive_fails > 20) {
                 /* Give up: leave loop. streaming flag stays in user intent —
                  * we signal thread death by setting it false just below. */
@@ -2103,7 +2128,7 @@ static void *native_streaming_thread(void *arg)
 cleanup:
     /* Send stop command to cleanly terminate streaming */
     send_stream_stop(dev);
-    usleep(100000);
+    ps_sleep_us(100000);
     flush_buffers(dev);
     /* Signal completion / thread death to observers. */
     dev->streaming = false;
@@ -2517,7 +2542,7 @@ static void *sdk_streaming_thread(void *arg)
     }
 
     /* Give the FPGA a moment to stabilise after LUT uploads. */
-    usleep(50000);
+    ps_sleep_us(50000);
 
     /* === Capture start: cmd1 + cmd2 + trigger ===
      *
@@ -2599,7 +2624,7 @@ static void *sdk_streaming_thread(void *arg)
 
 cleanup:
     send_stream_stop(dev);
-    usleep(100000);
+    ps_sleep_us(100000);
     flush_buffers(dev);
 
 cleanup_mem:
@@ -3203,10 +3228,10 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     int transferred;
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
                          &transferred, 1000);
-    usleep(10000);
+    ps_sleep_us(10000);
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
                          &transferred, 1000);
-    usleep(20000);
+    ps_sleep_us(20000);
 
     /* Flush config responses */
     uint8_t resp[CMD_SIZE];
@@ -3233,9 +3258,9 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
         build_capture_cmd1(dev, cmd1, n, dev->timebase);
         build_capture_cmd2(dev, cmd2);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE, &transferred, 1000);
-        usleep(10000);
+        ps_sleep_us(10000);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE, &transferred, 1000);
-        usleep(20000);
+        ps_sleep_us(20000);
         for (int i = 0; i < 3; i++) read_resp(dev, resp, CMD_SIZE, 100);
         status = poll_status(dev, 2000);
         dev->trigger_armed = saved;
@@ -3243,13 +3268,13 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     if (status == 0x7b) {
         /* Error recovery: flush + retry */
         flush_buffers(dev);
-        usleep(100000);
+        ps_sleep_us(100000);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
                              &transferred, 1000);
-        usleep(10000);
+        ps_sleep_us(10000);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
                              &transferred, 1000);
-        usleep(20000);
+        ps_sleep_us(20000);
         flush_buffers(dev);
         status = poll_status(dev, 2000);
         if (status != 0x3b) return PS_ERROR_STATE;
@@ -3263,7 +3288,7 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
      * capture is complete. */
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, dev->trigger_cmd,
                          CMD_SIZE, &transferred, 1000);
-    usleep(20000);
+    ps_sleep_us(20000);
 
     /* Read waveform data. Both single and dual captures use the same 16 KB
      * buffer; in dual mode the two channels are packed into that buffer
@@ -3273,7 +3298,7 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
 
     int raw_n = read_data(dev, raw, DATA_BUF_SIZE, TIMEOUT_DATA);
     if (raw_n < 4) {
-        usleep(200000);
+        ps_sleep_us(200000);
         raw_n = read_data(dev, raw, DATA_BUF_SIZE, TIMEOUT_DATA);
     }
     if (raw_n < 4) {
@@ -3647,10 +3672,10 @@ ps_status_t ps2204a_capture_raw(ps2204a_device_t *dev, int samples,
     int transferred;
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
                          &transferred, 1000);
-    usleep(10000);
+    ps_sleep_us(10000);
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
                          &transferred, 1000);
-    usleep(20000);
+    ps_sleep_us(20000);
 
     uint8_t resp[CMD_SIZE];
     for (int i = 0; i < 3; i++) {
@@ -3660,13 +3685,13 @@ ps_status_t ps2204a_capture_raw(ps2204a_device_t *dev, int samples,
     int status = poll_status(dev, 5000);
     if (status == 0x7b) {
         flush_buffers(dev);
-        usleep(100000);
+        ps_sleep_us(100000);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
                              &transferred, 1000);
-        usleep(10000);
+        ps_sleep_us(10000);
         libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
                              &transferred, 1000);
-        usleep(20000);
+        ps_sleep_us(20000);
         flush_buffers(dev);
         status = poll_status(dev, 2000);
         if (status != 0x3b) return PS_ERROR_STATE;
@@ -3675,14 +3700,14 @@ ps_status_t ps2204a_capture_raw(ps2204a_device_t *dev, int samples,
 
     libusb_bulk_transfer(dev->handle, EP_CMD_OUT, dev->trigger_cmd,
                          CMD_SIZE, &transferred, 1000);
-    usleep(20000);
+    ps_sleep_us(20000);
 
     uint8_t *raw = (uint8_t *)malloc(DATA_BUF_SIZE);
     if (!raw) return PS_ERROR_ALLOC;
 
     int raw_n = read_data(dev, raw, DATA_BUF_SIZE, TIMEOUT_DATA);
     if (raw_n < 4) {
-        usleep(200000);
+        ps_sleep_us(200000);
         raw_n = read_data(dev, raw, DATA_BUF_SIZE, TIMEOUT_DATA);
     }
     if (raw_n < 4) {
@@ -4257,7 +4282,7 @@ ps_status_t ps2204a_set_siggen(ps2204a_device_t *dev, ps_wave_t type,
         return PS_ERROR_USB;
     }
 
-    usleep(50000);
+    ps_sleep_us(50000);
     return PS_OK;
 }
 
@@ -4330,7 +4355,7 @@ ps_status_t ps2204a_set_siggen_raw(ps2204a_device_t *dev, ps_wave_t type,
     libusb_free_transfer(xc);
     libusb_free_transfer(xl);
     libusb_free_transfer(xg);
-    usleep(50000);
+    ps_sleep_us(50000);
     return ok ? PS_OK : PS_ERROR_USB;
 }
 

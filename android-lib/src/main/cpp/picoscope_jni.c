@@ -3,6 +3,14 @@
  * Consumed by io.github.wasabules.ps2204.PicoScope2204A.
  */
 
+/* setenv() is POSIX, not ISO C, so a strict -std=c11 build does not get its
+ * prototype from <stdlib.h>. State the POSIX level we rely on rather than
+ * depend on whichever default the toolchain happens to pick. Must precede
+ * every include. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <jni.h>
 #include <stdlib.h>
 #include <android/log.h>

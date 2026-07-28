@@ -48,6 +48,13 @@ target_compile_options(picoscope2204a_static PRIVATE
     -Wno-sign-compare -Wno-missing-field-initializers
 )
 
+# Pin our own targets to strict ISO C11. The driver used to rely on GNU
+# extensions without saying so — usleep() and M_PI are only visible with a
+# feature-test macro — which worked purely because CMake defaults to gnu11.
+# Both are now handled in the source, and this makes the build enforce it
+# instead of leaving it to luck. libusb keeps its own settings.
+set_target_properties(picoscope2204a_static PROPERTIES C_EXTENSIONS OFF)
+
 # ---------------------------------------------------------------------------
 # JNI shim — loaded by PicoScope2204A.java via System.loadLibrary()
 # ---------------------------------------------------------------------------
@@ -58,6 +65,8 @@ add_library(picoscope_jni SHARED
 target_link_libraries(picoscope_jni PRIVATE
     picoscope2204a_static
 )
+
+set_target_properties(picoscope_jni PROPERTIES C_EXTENSIONS OFF)
 
 # Android 15+ requires 16 KB page-size alignment for shared libraries on
 # devices that use 16 KB pages (Pixel 8/9, certain tablets). Without this
