@@ -92,9 +92,25 @@ static void ps_sleep_us(unsigned long us)
 #define TRIG_COUNTS_PER_LSB 295.0
 #define TRIG_BASE_A         0x7d
 #define TRIG_BASE_B         0x81
-#define TRIG_IDLE_A         0x7c
-#define TRIG_IDLE_B         0x81
 #define TRIG_IDLE_BAND      4
+
+/* Idle-band centre for the channel that is NOT the trigger source.
+ *
+ * These were fixed constants (0x7c for A, 0x81 for B). They are not: each one
+ * shifts by a count depending on whether that channel is enabled. Isolated
+ * with a 2x2 over enable state and threshold — the threshold has no effect:
+ *
+ *   channel A idle:  enabled 0x7d,  disabled 0x7c
+ *   channel B idle:  enabled 0x81,  disabled 0x7f
+ *
+ * The old constants were right for the case each was captured in (A disabled,
+ * B enabled) and a count out in the other. It is the inactive channel's
+ * "do not trigger on me" placeholder, so the error was harmless in practice,
+ * but there is no reason to keep sending the wrong byte. */
+#define TRIG_IDLE_A_ON      0x7d
+#define TRIG_IDLE_A_OFF     0x7c
+#define TRIG_IDLE_B_ON      0x81
+#define TRIG_IDLE_B_OFF     0x7f
 
 /* Samples the device delivers after the trigger beyond what it was asked for.
  *
@@ -677,6 +693,15 @@ static void build_capture_cmd1(ps2204a_device_t *dev, uint8_t *cmd,
     memcpy(cmd, tpl, sizeof(tpl));
 }
 
+/* Idle-band centre for `ch`, which is whichever channel is not the trigger
+ * source. Depends only on that channel's enable state — see the constants. */
+static uint8_t trig_idle_byte(const ps2204a_device_t *dev, ps_channel_t ch)
+{
+    bool on = dev->ch[ch].enabled;
+    if (ch == PS_CHANNEL_B) return on ? TRIG_IDLE_B_ON : TRIG_IDLE_B_OFF;
+    return on ? TRIG_IDLE_A_ON : TRIG_IDLE_A_OFF;
+}
+
 static void build_capture_cmd2(ps2204a_device_t *dev, uint8_t *cmd)
 {
     memset(cmd, 0, CMD_SIZE);
@@ -712,47 +737,82 @@ static void build_capture_cmd2(ps2204a_device_t *dev, uint8_t *cmd)
         int hyst = dev->trigger_hyst > 0 ? dev->trigger_hyst : 10;
 
         if (dev->trigger_mode == PS_TRIGGER_WINDOW) {
-            /* WINDOW trigger layout (CH A verified from SDK trace,
-             * trace_advtrig_window.log, 2026-04-18):
+            /* WINDOW trigger, traced in full from the SDK's advanced-trigger
+             * path (ps2000SetAdvTriggerChannelConditions / Directions /
+             * Properties) under usbmon, one configuration per second so each
+             * cmd2 is attributable by timestamp.
              *
-             *   cmd[7..8]   = 00 ff           (armed flag, same as LEVEL)
-             *   cmd[9..10]  = lower pair      (thr_lo, thr_lo − hyst)
-             *   cmd[11..12] = 7f 7b           (direction markers, CH A enter)
-             *   cmd[13..14] = upper pair      (thr_hi + hyst, thr_hi)
-             *   cmd[21]     = 0x0d            (WINDOW/ENTER selector)
+             * Everything below replaces guesswork. The previous code had the
+             * channel A slot constants wrong, the whole channel B layout wrong
+             * (it was extrapolated from LEVEL and never traced), no EXIT
+             * direction at all, and the channel B selector wrong.
              *
-             * Only ENTER direction (PS_RISING) has been traced; PS_FALLING
-             * is treated the same for now — the real SDK's "EXIT window"
-             * mode is not yet reverse-engineered.
+             * Slots. The active channel's two thresholds go in that channel's
+             * own pair of slots; the other channel gets 00 ff plus its idle
+             * band, exactly as in LEVEL:
              *
-             * CH B layout is extrapolated from LEVEL (base 0x80 instead of
-             * 0x7d, pair slots swapped) but not yet verified against a
-             * trace — flagged in the comment and worth confirming. */
+             *   source A:  [7..8] 00 ff   [9..10] lower   [11..12] idle B   [13..14] upper
+             *   source B:  [7..8] lower   [9..10] 00 ff   [11..12] upper    [13..14] idle A
+             *
+             * Direction decides which side of each threshold carries the
+             * hysteresis:
+             *
+             *   ENTER   lower = (lo, lo-h)    upper = (hi+h, hi)
+             *   EXIT    lower = (lo+h, lo)    upper = (hi, hi-h)
+             *   both    lower = (lo, lo-1)    upper = (hi, hi-1)   [1-count band]
+             *
+             * Selector cmd[21] is channel-dependent here, unlike LEVEL:
+             *
+             *            ENTER   EXIT   ENTER_OR_EXIT
+             *   source A  0x0d   0x0e   0x0f
+             *   source B  0x29   0x31   0x39
+             *
+             * ENTER_OR_EXIT has no public direction in this API; the encoding
+             * is recorded above so it can be exposed without re-tracing.
+             *
+             * Thresholds use the same base + floor(thr_sdk16 / 295) as LEVEL,
+             * and the hysteresis divides by 295 too. Confirmed on an
+             * asymmetric window (+16000 / -4000): 0x81+54 = 0xb7 upper,
+             * 0x81-14 = 0x73 lower, both exact. The old code divided by 288
+             * and rounded, which drifts from the device by a count over most
+             * of the range. */
             int32_t thr_lo = (int32_t)dev->trigger_thr_sdk;
             int32_t thr_hi = (int32_t)dev->trigger_thr2_sdk;
-            int32_t dlo = thr_lo >= 0 ? (thr_lo + 144) / 288 : (thr_lo - 144) / 288;
-            int32_t dhi = thr_hi >= 0 ? (thr_hi + 144) / 288 : (thr_hi - 144) / 288;
+            int32_t dlo = (int32_t)floor((double)thr_lo / TRIG_COUNTS_PER_LSB);
+            int32_t dhi = (int32_t)floor((double)thr_hi / TRIG_COUNTS_PER_LSB);
+            int on_b = (dev->trigger_source == PS_CHANNEL_B);
+            uint8_t base    = on_b ? TRIG_BASE_B : TRIG_BASE_A;
+            uint8_t lo_byte = (uint8_t)((base + dlo) & 0xFF);
+            uint8_t hi_byte = (uint8_t)((base + dhi) & 0xFF);
 
-            cmd[7]  = 0x00; cmd[8]  = 0xff;
-
-            if (dev->trigger_source == PS_CHANNEL_B) {
-                uint8_t lo_byte = (uint8_t)((0x80 + dlo) & 0xFF);
-                uint8_t hi_byte = (uint8_t)((0x80 + dhi) & 0xFF);
-                cmd[9]  = lo_byte;
-                cmd[10] = (uint8_t)((lo_byte - hyst) & 0xFF);
-                cmd[11] = 0x7d; cmd[12] = 0x79;
-                cmd[13] = (uint8_t)((hi_byte + hyst) & 0xFF);
-                cmd[14] = hi_byte;
+            /* PS_FALLING is EXIT — see ps2204a_set_trigger_window. */
+            int exit_dir = (dev->trigger_dir == PS_FALLING);
+            uint8_t lo_a, lo_b, hi_a, hi_b;
+            if (exit_dir) {
+                lo_a = (uint8_t)((lo_byte + hyst) & 0xFF); lo_b = lo_byte;
+                hi_a = hi_byte; hi_b = (uint8_t)((hi_byte - hyst) & 0xFF);
             } else {
-                uint8_t lo_byte = (uint8_t)((0x7d + dlo) & 0xFF);
-                uint8_t hi_byte = (uint8_t)((0x7d + dhi) & 0xFF);
-                cmd[9]  = lo_byte;
-                cmd[10] = (uint8_t)((lo_byte - hyst) & 0xFF);
-                cmd[11] = 0x7f; cmd[12] = 0x7b;
-                cmd[13] = (uint8_t)((hi_byte + hyst) & 0xFF);
-                cmd[14] = hi_byte;
+                lo_a = lo_byte; lo_b = (uint8_t)((lo_byte - hyst) & 0xFF);
+                hi_a = (uint8_t)((hi_byte + hyst) & 0xFF); hi_b = hi_byte;
             }
-            cmd[21] = 0x0d;
+
+            uint8_t idle = trig_idle_byte(dev, on_b ? PS_CHANNEL_A : PS_CHANNEL_B);
+            uint8_t idl_hi = idle;
+            uint8_t idl_lo = (uint8_t)((idle - TRIG_IDLE_BAND) & 0xFF);
+
+            if (on_b) {
+                cmd[7]  = lo_a;   cmd[8]  = lo_b;
+                cmd[9]  = 0x00;   cmd[10] = 0xff;
+                cmd[11] = hi_a;   cmd[12] = hi_b;
+                cmd[13] = idl_hi; cmd[14] = idl_lo;
+                cmd[21] = exit_dir ? 0x31 : 0x29;
+            } else {
+                cmd[7]  = 0x00;   cmd[8]  = 0xff;
+                cmd[9]  = lo_a;   cmd[10] = lo_b;
+                cmd[11] = idl_hi; cmd[12] = idl_lo;
+                cmd[13] = hi_a;   cmd[14] = hi_b;
+                cmd[21] = exit_dir ? 0x0e : 0x0d;
+            }
             return;
         }
 
@@ -803,7 +863,7 @@ static void build_capture_cmd2(ps2204a_device_t *dev, uint8_t *cmd)
 
         int on_b = (dev->trigger_source == PS_CHANNEL_B);
         uint8_t thr_byte  = (uint8_t)(((on_b ? TRIG_BASE_B : TRIG_BASE_A) + delta) & 0xFF);
-        uint8_t idle_byte = on_b ? TRIG_IDLE_A : TRIG_IDLE_B;
+        uint8_t idle_byte = trig_idle_byte(dev, on_b ? PS_CHANNEL_A : PS_CHANNEL_B);
 
         uint8_t act_hi, act_lo, idl_hi, idl_lo;
         if (dev->trigger_dir == PS_FALLING) {

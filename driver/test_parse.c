@@ -259,6 +259,62 @@ static void test_ring_read_unwraps(void)
 
 /* ---------------------------------------------------------------- */
 
+/* Every advanced-trigger configuration traced from the SDK under usbmon, one
+ * per second so each cmd2 could be attributed by timestamp. These bytes are
+ * the device's own answer, not a model of it -- if this test fails, the
+ * encoding changed, not the expectation. */
+static void test_trigger_cmd2_matches_sdk(void)
+{
+    static const struct {
+        const char *tag;
+        int src, a_en, b_en, mode, dir, thr, thr2, hyst;
+        const char *want;      /* cmd[7..14] */
+        int sel;               /* cmd[21] */
+    } cases[] = {
+        /* LEVEL: the idle byte of the inactive channel shifts with its
+         * enable state -- 0x7d/0x7c for A, 0x81/0x7f for B. */
+        { "LEVEL rising B, A on",   1,1,1, PS_TRIGGER_LEVEL,  PS_RISING,  8000,0,10, "00ff00ff9c927d79", 0x09 },
+        { "LEVEL falling B, A on",  1,1,1, PS_TRIGGER_LEVEL,  PS_FALLING, 8000,0,10, "00ff00ffa69c817d", 0x12 },
+        { "LEVEL rising B, A off",  1,0,1, PS_TRIGGER_LEVEL,  PS_RISING,  8000,0,10, "00ff00ff9c927c78", 0x09 },
+        { "LEVEL rising A, B on",   0,1,1, PS_TRIGGER_LEVEL,  PS_RISING,  8000,0,10, "00ff00ff817d988e", 0x09 },
+        { "LEVEL falling A, B on",  0,1,1, PS_TRIGGER_LEVEL,  PS_FALLING, 8000,0,10, "00ff00ff8581a298", 0x12 },
+        { "LEVEL rising A, B off",  0,1,0, PS_TRIGGER_LEVEL,  PS_RISING,  8000,0,10, "00ff00ff7f7b988e", 0x09 },
+        /* WINDOW: slots swap with the source channel and the selector is
+         * channel-dependent, unlike LEVEL. */
+        { "WINDOW enter A",         0,1,1, PS_TRIGGER_WINDOW, PS_RISING, -8000, 8000,3, "00ff615e817d9b98", 0x0d },
+        { "WINDOW exit A",          0,1,1, PS_TRIGGER_WINDOW, PS_FALLING,-8000, 8000,3, "00ff6461817d9895", 0x0e },
+        { "WINDOW enter B",         1,1,1, PS_TRIGGER_WINDOW, PS_RISING, -8000, 8000,3, "656200ff9f9c7d79", 0x29 },
+        { "WINDOW exit B",          1,1,1, PS_TRIGGER_WINDOW, PS_FALLING,-8000, 8000,3, "686500ff9c997d79", 0x31 },
+        /* Asymmetric window pins the 295 divisor and the floor on both
+         * signs at once: 0x81+54 = 0xb7, 0x81-14 = 0x73. */
+        { "WINDOW enter B asym",    1,1,1, PS_TRIGGER_WINDOW, PS_RISING, -4000,16000,3, "737000ffbab77d79", 0x29 },
+    };
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ps2204a_device_t dev;
+        memset(&dev, 0, sizeof(dev));
+        dev.trigger_armed   = true;
+        dev.trigger_source  = (ps_channel_t)cases[i].src;
+        dev.ch[0].enabled   = cases[i].a_en;
+        dev.ch[1].enabled   = cases[i].b_en;
+        dev.trigger_mode    = (ps_trigger_mode_t)cases[i].mode;
+        dev.trigger_dir     = (ps_trigger_dir_t)cases[i].dir;
+        dev.trigger_thr_sdk = (int16_t)cases[i].thr;
+        dev.trigger_thr2_sdk= (int16_t)cases[i].thr2;
+        dev.trigger_hyst    = (uint8_t)cases[i].hyst;
+
+        uint8_t cmd[CMD_SIZE];
+        build_capture_cmd2(&dev, cmd);
+
+        char got[17];
+        for (int k = 0; k < 8; k++) sprintf(got + 2 * k, "%02x", cmd[7 + k]);
+        CHECK(strcmp(got, cases[i].want) == 0,
+              "%s: cmd[7..14] want %s got %s", cases[i].tag, cases[i].want, got);
+        CHECK(cmd[21] == cases[i].sel,
+              "%s: cmd[21] want 0x%02x got 0x%02x", cases[i].tag, cases[i].sel, cmd[21]);
+    }
+}
+
 static void test_range_index_bounds(void)
 {
     CHECK(range_index(PS_50MV) == 0, "PS_50MV must map to 0");
@@ -289,6 +345,7 @@ int main(void)
         { "movavg: no-op and guard cases",        test_moving_average_noop_cases },
         { "ring_read: unwraps correctly",         test_ring_read_unwraps },
         { "range_index: bounds",                  test_range_index_bounds },
+        { "trigger cmd2: matches SDK traces",      test_trigger_cmd2_matches_sdk },
     };
 
     for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {

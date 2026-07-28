@@ -343,8 +343,50 @@ streaming.
 
 ### Window trigger
 
-`cmd2[9..10]` and `cmd2[13..14]` carry the `[lo, hi]` threshold pair,
-with `cmd[21] = 0x0d` selecting window mode.
+Traced in full from the SDK's advanced-trigger path
+(`ps2000SetAdvTriggerChannelConditions` / `Directions` / `Properties`) under
+usbmon, one configuration per second so each `cmd2` is attributable by
+timestamp.
+
+The active channel's two thresholds go in that channel's own slots; the other
+channel gets `00 ff` plus its idle band, exactly as in LEVEL:
+
+| source | `[7..8]` | `[9..10]` | `[11..12]` | `[13..14]` |
+|--------|----------|-----------|------------|------------|
+| A | `00 ff` | lower pair | idle B | upper pair |
+| B | lower pair | `00 ff` | upper pair | idle A |
+
+Direction decides which side of each threshold carries the hysteresis `h`:
+
+| direction | lower pair | upper pair |
+|-----------|------------|------------|
+| ENTER | `(lo, lo−h)` | `(hi+h, hi)` |
+| EXIT | `(lo+h, lo)` | `(hi, hi−h)` |
+| ENTER_OR_EXIT | `(lo, lo−1)` | `(hi, hi−1)` |
+
+`cmd[21]` is channel-dependent here, unlike LEVEL:
+
+| | ENTER | EXIT | ENTER_OR_EXIT |
+|---|-------|------|---------------|
+| source A | `0x0d` | `0x0e` | `0x0f` |
+| source B | `0x29` | `0x31` | `0x39` |
+
+Thresholds use the same `base + floor(thr_sdk16 / 295)` as LEVEL, and the
+hysteresis divides by 295 too. Confirmed on an asymmetric window
+(+16000 / −4000): `0x81 + 54 = 0xb7` upper, `0x81 − 14 = 0x73` lower, both
+exact. An earlier version of this driver divided by 288 and rounded, which
+drifts by a count over most of the range.
+
+**On the hardware side, window mode is weak.** Against a 5 kHz sine on
+channel B, our ENTER on `[+200, +800] mV` locks hard — overlay spread 6.2 mV
+against a 684 mV signal — but EXIT never locks. Neither does any of the four
+configurations driven through the SDK itself: its best is 462 mV against a
+695 mV free-running baseline. So EXIT not locking is a property of this
+device or mode, not of the encoding, which matches the SDK byte for byte on
+all eleven traced configurations (locked in by `test_parse`). Note also that
+a window straddling zero is ambiguous by construction on a sine — the signal
+enters it twice per period at different phases, so the spread stays high even
+with a perfect trigger.
 
 ### Pulse-width qualifier (PWQ)
 
