@@ -273,6 +273,11 @@ struct ps2204a_device {
     ps_cal_table_t builtin_cal;          /* reference-unit fallback */
     bool           using_eeprom_cal;
     ps_overflow_t  last_overflow;
+    /* Last capture config actually sent, so an unchanged one can be re-armed
+     * instead of resent — see ps2204a_capture_block. */
+    uint8_t        last_cmd1[CMD_SIZE];
+    uint8_t        last_cmd2[CMD_SIZE];
+    bool           capture_cfg_valid;
 
     /* Enhanced resolution: moving-average box filter with N = 4^extra_bits
      * taps. 0 = disabled (native 8-bit), up to 4 (12-bit effective). */
@@ -3300,23 +3305,53 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
 
     flush_buffers(dev);
 
-    /* Build and send config commands */
+    /* Build the config, then decide whether the device needs to hear it.
+     *
+     * The SDK sends the pair once and re-arms every later capture with a bare
+     * `85 04 81`; its steady-state loop is poll, poll, commit, re-arm. This
+     * driver rebuilt and resent both packets before every capture, which makes
+     * the device re-establish its trigger and timing state each time. The
+     * re-arm point then lands wherever it lands relative to the sample clock,
+     * and that shows up as jitter: 1.4-1.7 samples of overlay spread against
+     * the SDK's 0.55-0.70 on the same signal.
+     *
+     * Comparing the built bytes rather than tracking a dirty flag across every
+     * setter means the fast path can never drift out of step with the config
+     * it is supposed to represent. */
     uint8_t cmd1[CMD_SIZE], cmd2[CMD_SIZE];
     build_capture_cmd1(dev, cmd1, n, dev->timebase);
     build_capture_cmd2(dev, cmd2);
 
-    int transferred;
-    libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
-                         &transferred, 1000);
-    ps_sleep_us(10000);
-    libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
-                         &transferred, 1000);
-    ps_sleep_us(20000);
+    bool reuse = dev->capture_cfg_valid &&
+                 memcmp(cmd1, dev->last_cmd1, CMD_SIZE) == 0 &&
+                 memcmp(cmd2, dev->last_cmd2, CMD_SIZE) == 0;
 
-    /* Flush config responses */
+    int transferred;
     uint8_t resp[CMD_SIZE];
-    for (int i = 0; i < 3; i++) {
-        if (read_resp(dev, resp, CMD_SIZE, 100) <= 0) break;
+    if (reuse) {
+        static const uint8_t rearm[10] = { 0x02, 0x85, 0x04, 0x81 };
+        uint8_t cmd[CMD_SIZE];
+        memset(cmd, 0, CMD_SIZE);
+        memcpy(cmd, rearm, sizeof(rearm));
+        libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd, CMD_SIZE,
+                             &transferred, 1000);
+        ps_sleep_us(2000);
+        read_resp(dev, resp, CMD_SIZE, 50);
+    } else {
+        libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd1, CMD_SIZE,
+                             &transferred, 1000);
+        ps_sleep_us(10000);
+        libusb_bulk_transfer(dev->handle, EP_CMD_OUT, cmd2, CMD_SIZE,
+                             &transferred, 1000);
+        ps_sleep_us(20000);
+
+        /* Flush config responses */
+        for (int i = 0; i < 3; i++) {
+            if (read_resp(dev, resp, CMD_SIZE, 100) <= 0) break;
+        }
+        memcpy(dev->last_cmd1, cmd1, CMD_SIZE);
+        memcpy(dev->last_cmd2, cmd2, CMD_SIZE);
+        dev->capture_cfg_valid = true;
     }
 
     /* Poll status. Timeout scales with timebase — at tb=20+ a single block
@@ -3326,6 +3361,12 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
     int poll_timeout = (int)(block_ms + 2000);
     if (poll_timeout < 5000) poll_timeout = 5000;
     int status = poll_status(dev, poll_timeout);
+    if (status != 0x3b) {
+        /* Something went wrong — drop the cached config so the next capture
+         * reconfigures from scratch rather than re-arming a device whose state
+         * we can no longer vouch for. */
+        dev->capture_cfg_valid = false;
+    }
 
     /* Host-side auto-trigger: if an armed trigger didn't fire within the
      * timeout, fall back to a free-run capture so the caller still gets a
