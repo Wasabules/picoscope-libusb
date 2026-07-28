@@ -170,10 +170,10 @@ static inline ps_status_t wrap_get_last_overflow(ps2204a_device_t *dev,
 static inline ps_status_t wrap_set_ets(ps2204a_device_t *dev, int mode,
                                        int interleaves, int cycles,
                                        int *out_interval_ps) {
-    uint32_t ips = 0;
+    int ips = 0;
     ps_status_t st = ps2204a_set_ets(dev, (ps_ets_mode_t)mode,
                                      interleaves, cycles, &ips);
-    if (out_interval_ps) *out_interval_ps = (int)ips;
+    if (out_interval_ps) *out_interval_ps = ips;
     return st;
 }
 

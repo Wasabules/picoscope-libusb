@@ -205,4 +205,172 @@ public final class PicoScope2204A {
 
     /** @return device serial in the form {@code JOxxxxxxxx}, or empty string */
     public static native String nativeGetSerial(long handle);
+
+    /* ====================================================================
+     * Resolution enhancement
+     * ==================================================================== */
+
+    /**
+     * Trade bandwidth for vertical resolution by averaging 4^extraBits
+     * neighbouring samples. Each step halves the noise: measured on this
+     * hardware, 6.14 effective bits at 0 rises to 9.44 at 4.
+     *
+     * @param extraBits 0 (off) to 4
+     * @return 0 on success, negative {@code PS_ERROR_*} otherwise
+     */
+    public static native int nativeSetResolutionEnhancement(long handle, int extraBits);
+
+    /* ====================================================================
+     * Overflow
+     * ==================================================================== */
+
+    /**
+     * Rail counts for the most recent capture, as
+     * {@code [clippedA, clippedB, total]}, or {@code null} on failure.
+     *
+     * <p>The driver clamps corrected samples to ±range so a gain above 1
+     * cannot extrapolate past the rails — which also hides the difference
+     * between a signal sitting at full scale and one driven beyond it. These
+     * counts come from the raw ADC codes, before scaling, so a non-zero value
+     * means the input genuinely exceeded the selected range.</p>
+     */
+    public static native int[] nativeGetLastOverflow(long handle);
+
+    /* ====================================================================
+     * Equivalent-time sampling
+     * ==================================================================== */
+
+    /** ETS off. */
+    public static final int ETS_OFF  = 0;
+    /** ETS ≈1 GS/s effective (10 interleaves, 2 cycles by default). */
+    public static final int ETS_FAST = 1;
+    /** ETS ≈2 GS/s effective (20 interleaves, 4 cycles by default). */
+    public static final int ETS_SLOW = 2;
+
+    /**
+     * Enable equivalent-time sampling. The ADC runs at 100 MS/s; on a
+     * repetitive signal the device captures many triggered blocks, each offset
+     * by a fraction of a sample period, and interleaves them. Requires a stable
+     * trigger and a waveform that actually repeats — a one-shot event yields
+     * noise.
+     *
+     * @param mode        {@link #ETS_OFF}, {@link #ETS_FAST} or {@link #ETS_SLOW}
+     * @param interleaves 2..20, or 0 for the mode default
+     * @param cycles      1..32, or 0 for the mode default
+     * @return effective per-sample interval in picoseconds, or a negative
+     *         {@code PS_ERROR_*} on failure
+     */
+    public static native int nativeSetEts(long handle, int mode,
+                                          int interleaves, int cycles);
+
+    /** Disable ETS and resume normal block capture. */
+    public static native int nativeDisableEts(long handle);
+
+    /**
+     * Run an ETS acquisition. Returns a flat array of length {@code 2*actual}:
+     * the first {@code actual} floats are CH A, the next {@code actual} are
+     * CH B — the same layout as {@link #nativeCaptureBlockDual}. The per-sample
+     * interval is whatever {@link #nativeSetEts} reported, not the timebase.
+     *
+     * @param nSamples per-cycle sample count, 1..8192; the result holds up to
+     *                 {@code nSamples × interleaves} points
+     */
+    public static native float[] nativeCaptureEts(long handle, int nSamples);
+
+    /* ====================================================================
+     * Advanced triggers
+     * ==================================================================== */
+
+    /**
+     * Edge trigger with a hysteresis band, in ADC codes, that stops a noisy
+     * edge from re-triggering on its own ripple.
+     */
+    public static native int nativeSetTriggerEx(long handle, int source,
+                                                float thresholdMv, int dir,
+                                                float delayPct, int autoMs,
+                                                int hysteresisCounts);
+
+    /**
+     * Fire when the signal enters ({@code dir = RISING}) or leaves
+     * ({@code dir = FALLING}) the band between {@code lowerMv} and
+     * {@code upperMv} — the usual way to catch a level drifting out of
+     * tolerance.
+     */
+    public static native int nativeSetTriggerWindow(long handle, int source,
+                                                    float lowerMv, float upperMv,
+                                                    int dir, float delayPct,
+                                                    int autoMs);
+
+    /**
+     * Fire on a level crossing only when the pulse that preceded it lasted
+     * between {@code lowerNs} and {@code upperNs} — for hunting runts and
+     * glitches. Pass {@code upperNs = 0} for no upper bound.
+     */
+    public static native int nativeSetTriggerPwq(long handle, int source,
+                                                 float thresholdMv, int dir,
+                                                 int lowerNs, int upperNs,
+                                                 float delayPct, int autoMs);
+
+    /* ====================================================================
+     * Arbitrary waveform
+     * ==================================================================== */
+
+    /**
+     * Upload a user-defined waveform. The device is a true AWG — every siggen
+     * call already uploads an 8192-byte LUT — so the built-in shapes are not a
+     * hardware limit.
+     *
+     * @param lut         2..4096 samples, full-scale {@code -32768..32767};
+     *                    shorter inputs are linearly resampled
+     * @param frequencyHz playback frequency
+     * @param pkpkUv      peak-to-peak amplitude in microvolts
+     */
+    public static native int nativeSetSiggenArbitrary(long handle, short[] lut,
+                                                      float frequencyHz, int pkpkUv);
+
+    /* ====================================================================
+     * Aggregated streaming
+     * ==================================================================== */
+
+    /**
+     * Reduce the streaming ring to {@code nBuckets} (min, max) pairs. Returns a
+     * flat array of length {@code 4*actual}: {@code minA}, {@code maxA},
+     * {@code minB}, {@code maxB}, each {@code actual} long — so slice it in
+     * quarters. {@code null} on failure.
+     *
+     * <p>Decimating instead drops whatever falls between the samples it keeps,
+     * so a narrow glitch in a multi-second window simply disappears. Keeping
+     * both extremes of each bucket bounds the signal rather than sampling it,
+     * which is what a roll display needs once the window is longer than the
+     * pixel count.</p>
+     *
+     * @param span number of trailing samples to cover, or 0 for everything the
+     *             ring holds
+     */
+    public static native float[] nativeGetStreamingAggregated(long handle,
+                                                              int nBuckets,
+                                                              int span);
+
+    /* ====================================================================
+     * EEPROM calibration
+     * ==================================================================== */
+
+    /**
+     * Per-unit factory trim decoded from the device's own EEPROM. Returns 29
+     * floats: {@code [valid, active, offsetMv × 9, gainA × 9, gainB × 9]},
+     * ranges ordered 50 mV … 20 V. {@code null} on failure.
+     *
+     * <p>The offsets are confirmed against a hand-measured reference (Pearson
+     * r = 0.9989). The gain blocks are not: measuring one signal across four
+     * ranges — which the correct table must render identically — came out worse
+     * with them than with the built-in table, so the driver still applies the
+     * built-in one by default. See {@code docs/protocol.md}.</p>
+     */
+    public static native float[] nativeGetEepromCalibration(long handle);
+
+    /**
+     * Switch between the device's own trim and the built-in reference table.
+     * Fails with {@code PS_ERROR_STATE} if the EEPROM did not decode.
+     */
+    public static native int nativeUseEepromCalibration(long handle, boolean enable);
 }

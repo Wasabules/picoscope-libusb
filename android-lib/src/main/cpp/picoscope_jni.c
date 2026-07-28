@@ -368,3 +368,241 @@ JNI_FN(nativeGetSerial)(JNIEnv *env, jclass cls, jlong handle)
     ps2204a_get_info(dev, serial, sizeof(serial), NULL, 0);
     return (*env)->NewStringUTF(env, serial);
 }
+
+/* Resolution enhancement -------------------------------------------------- */
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetResolutionEnhancement)(JNIEnv *env, jclass cls, jlong handle,
+                                       jint extra_bits)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_set_resolution_enhancement(dev, (int)extra_bits);
+}
+
+/* Overflow ---------------------------------------------------------------- */
+
+/* [clipped_a, clipped_b, total] — the driver clamps corrected samples to
+ * ±range, so these raw rail counts are the only way to tell a signal at full
+ * scale from one driven past it. */
+JNIEXPORT jintArray JNICALL
+JNI_FN(nativeGetLastOverflow)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    ps_overflow_t ov = {0};
+    if (ps2204a_get_last_overflow(dev, &ov) != PS_OK) return NULL;
+
+    jintArray arr = (*env)->NewIntArray(env, 3);
+    if (!arr) return NULL;
+    jint vals[3] = { (jint)ov.clipped_a, (jint)ov.clipped_b, (jint)ov.total };
+    (*env)->SetIntArrayRegion(env, arr, 0, 3, vals);
+    return arr;
+}
+
+/* Equivalent-time sampling ------------------------------------------------ */
+
+/* Returns the effective per-sample interval in picoseconds, or -status. */
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetEts)(JNIEnv *env, jclass cls, jlong handle,
+                     jint mode, jint interleaves, jint cycles)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    int interval_ps = 0;
+    ps_status_t st = ps2204a_set_ets(dev, (ps_ets_mode_t)mode,
+                                     (int)interleaves, (int)cycles, &interval_ps);
+    if (st != PS_OK) {
+        LOGE("ps2204a_set_ets failed, status=%d", (int)st);
+        return (jint)st;
+    }
+    return (jint)interval_ps;
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeDisableEts)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_disable_ets(dev);
+}
+
+/* Interleaved [A..., B...] like nativeCaptureBlockDual. The per-sample
+ * interval is whatever nativeSetEts reported. */
+JNIEXPORT jfloatArray JNICALL
+JNI_FN(nativeCaptureEts)(JNIEnv *env, jclass cls, jlong handle, jint n_samples)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (!dev || n_samples <= 0 || n_samples > 8192) return NULL;
+
+    /* Worst case is n_samples × 20 interleaves. */
+    int cap = (int)n_samples * 20;
+    float *a = (float *)malloc((size_t)cap * sizeof(float));
+    float *b = (float *)malloc((size_t)cap * sizeof(float));
+    if (!a || !b) { free(a); free(b); return NULL; }
+
+    int actual = 0, interval_ps = 0;
+    ps_status_t st = ps2204a_capture_ets(dev, (int)n_samples, a, b, cap,
+                                         &actual, &interval_ps);
+    if (st != PS_OK || actual <= 0) {
+        LOGE("ps2204a_capture_ets failed, status=%d actual=%d", (int)st, actual);
+        free(a); free(b);
+        return NULL;
+    }
+
+    jfloatArray result = (*env)->NewFloatArray(env, 2 * actual);
+    if (result) {
+        (*env)->SetFloatArrayRegion(env, result, 0, actual, a);
+        (*env)->SetFloatArrayRegion(env, result, actual, actual, b);
+    }
+    free(a); free(b);
+    return result;
+}
+
+/* Advanced triggers ------------------------------------------------------- */
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetTriggerEx)(JNIEnv *env, jclass cls, jlong handle,
+                           jint source, jfloat threshold_mv, jint dir,
+                           jfloat delay_pct, jint auto_ms, jint hysteresis)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_set_trigger_ex(dev, (ps_channel_t)source,
+                                        (float)threshold_mv,
+                                        (ps_trigger_dir_t)dir,
+                                        (float)delay_pct, (int)auto_ms,
+                                        (int)hysteresis);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetTriggerWindow)(JNIEnv *env, jclass cls, jlong handle,
+                               jint source, jfloat lower_mv, jfloat upper_mv,
+                               jint dir, jfloat delay_pct, jint auto_ms)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_set_trigger_window(dev, (ps_channel_t)source,
+                                            (float)lower_mv, (float)upper_mv,
+                                            (ps_trigger_dir_t)dir,
+                                            (float)delay_pct, (int)auto_ms);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetTriggerPwq)(JNIEnv *env, jclass cls, jlong handle,
+                            jint source, jfloat threshold_mv, jint dir,
+                            jint lower_ns, jint upper_ns,
+                            jfloat delay_pct, jint auto_ms)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_set_trigger_pwq(dev, (ps_channel_t)source,
+                                         (float)threshold_mv,
+                                         (ps_trigger_dir_t)dir,
+                                         (int)lower_ns, (int)upper_ns,
+                                         (float)delay_pct, (int)auto_ms);
+}
+
+/* Arbitrary waveform ------------------------------------------------------ */
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetSiggenArbitrary)(JNIEnv *env, jclass cls, jlong handle,
+                                 jshortArray lut, jfloat frequency_hz,
+                                 jint pkpk_uv)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (!dev || !lut) return (jint)PS_ERROR_PARAM;
+
+    jsize n = (*env)->GetArrayLength(env, lut);
+    if (n < 2 || n > 4096) return (jint)PS_ERROR_PARAM;
+
+    jshort *elems = (*env)->GetShortArrayElements(env, lut, NULL);
+    if (!elems) return (jint)PS_ERROR_ALLOC;
+
+    ps_status_t st = ps2204a_set_siggen_arbitrary(dev, (const int16_t *)elems,
+                                                  (int)n, (float)frequency_hz,
+                                                  (uint32_t)pkpk_uv);
+    (*env)->ReleaseShortArrayElements(env, lut, elems, JNI_ABORT);
+    return (jint)st;
+}
+
+/* Aggregated streaming ---------------------------------------------------- */
+
+/* Returns [minA..., maxA..., minB..., maxB...], each `buckets` long, so the
+ * caller can slice by a quarter. Aggregation is what keeps a narrow glitch
+ * visible in a long window; plain decimation drops whatever falls between the
+ * samples it keeps. */
+JNIEXPORT jfloatArray JNICALL
+JNI_FN(nativeGetStreamingAggregated)(JNIEnv *env, jclass cls, jlong handle,
+                                     jint n_buckets, jint span)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (!dev || n_buckets <= 0 || n_buckets > 65536) return NULL;
+
+    size_t sz = (size_t)n_buckets * sizeof(float);
+    float *mn_a = (float *)malloc(sz), *mx_a = (float *)malloc(sz);
+    float *mn_b = (float *)malloc(sz), *mx_b = (float *)malloc(sz);
+    if (!mn_a || !mx_a || !mn_b || !mx_b) {
+        free(mn_a); free(mx_a); free(mn_b); free(mx_b);
+        return NULL;
+    }
+
+    int actual = 0;
+    ps_status_t st = ps2204a_get_streaming_aggregated(dev, mn_a, mx_a, mn_b, mx_b,
+                                                      (int)n_buckets, (int)span,
+                                                      &actual);
+    if (st != PS_OK || actual <= 0) {
+        free(mn_a); free(mx_a); free(mn_b); free(mx_b);
+        return NULL;
+    }
+
+    jfloatArray result = (*env)->NewFloatArray(env, 4 * actual);
+    if (result) {
+        (*env)->SetFloatArrayRegion(env, result, 0 * actual, actual, mn_a);
+        (*env)->SetFloatArrayRegion(env, result, 1 * actual, actual, mx_a);
+        (*env)->SetFloatArrayRegion(env, result, 2 * actual, actual, mn_b);
+        (*env)->SetFloatArrayRegion(env, result, 3 * actual, actual, mx_b);
+    }
+    free(mn_a); free(mx_a); free(mn_b); free(mx_b);
+    return result;
+}
+
+/* EEPROM calibration ------------------------------------------------------ */
+
+/* Returns [valid, active, offset_mv × 9, gainA × 9, gainB × 9] = 29 floats.
+ * See docs/protocol.md: the offsets are confirmed, the gain blocks are not,
+ * which is why applying this table is opt-in. */
+JNIEXPORT jfloatArray JNICALL
+JNI_FN(nativeGetEepromCalibration)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    ps_cal_table_t cal;
+    if (ps2204a_get_eeprom_calibration(dev, &cal) != PS_OK) return NULL;
+
+    const int n = PS2204A_NUM_RANGES;
+    jfloatArray arr = (*env)->NewFloatArray(env, 2 + 3 * n);
+    if (!arr) return NULL;
+
+    float head[2] = {
+        cal.valid ? 1.0f : 0.0f,
+        ps2204a_eeprom_calibration_active(dev) ? 1.0f : 0.0f,
+    };
+    (*env)->SetFloatArrayRegion(env, arr, 0, 2, head);
+    (*env)->SetFloatArrayRegion(env, arr, 2,         n, cal.offset_mv);
+    (*env)->SetFloatArrayRegion(env, arr, 2 + n,     n, cal.gain[0]);
+    (*env)->SetFloatArrayRegion(env, arr, 2 + 2 * n, n, cal.gain[1]);
+    return arr;
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeUseEepromCalibration)(JNIEnv *env, jclass cls, jlong handle,
+                                   jboolean enable)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return (jint)ps2204a_use_eeprom_calibration(dev, enable == JNI_TRUE);
+}
