@@ -3745,9 +3745,9 @@ ps_status_t ps2204a_capture_ets(ps2204a_device_t *dev, int n_samples,
 
     /* ETS honours the caller's current timebase as the base rate.
      * Effective per-sample interval is (base_ns × 1000) / interleaves in ps.
-     * A lower timebase produces a finer ETS grid, but tb=0..2 are known to
-     * return stale buffer data on some PS2204A units — callers should use
-     * tb=3 (80 ns) or lower if verified working on their unit. */
+     * A lower timebase produces a finer ETS grid, but not usefully below
+     * tb=3: measured on this unit, tb=0 never completes, tb=1 is flaky and
+     * loses 60 % of the amplitude, tb=2 loses 30 %. See the table below. */
     int base_ns = ps2204a_timebase_to_ns(dev->timebase);
     if (base_ns < 10) base_ns = 10;
 
@@ -3756,22 +3756,44 @@ ps_status_t ps2204a_capture_ets(ps2204a_device_t *dev, int n_samples,
     int saved_res_bits = dev->res_extra_bits;
     dev->res_extra_bits = 0;
 
-    /* Force trigger_delay_pct = +100 (trigger at start of block). On this
-     * hardware, armed-trigger captures return stale buffer data at any
-     * other delay (verified via bench_trigger_delay: only dp=+100 shows a
-     * real signal). For ETS we look at the first edge inside the block
-     * anyway, so trigger-at-start is the natural choice. */
+    /* Put the trigger mid-block.
+     *
+     * This used to force dp = +100 (trigger at the very start), justified by
+     * "armed-trigger captures return stale buffer data at any other delay".
+     * That was true, and it was the missing pre-trigger count — the device was
+     * never told how many samples to keep before the trigger, so everything
+     * ahead of it was circular-buffer residue. Fixed since; delay_pct now
+     * lands within 0.1 % across the range.
+     *
+     * The stale workaround did not merely cost accuracy, it broke ETS
+     * outright. With the trigger at index 0 there are no samples before the
+     * crossing to interpolate against, so estimate_trigger_phase failed every
+     * round and capture_ets returned PS_ERROR_TIMEOUT at every timebase.
+     * Mid-block gives it room on both sides, and ETS works:
+     *
+     *   tb   effective interval   amplitude of a 200 kHz sine   stability
+     *   0    —                    —                             always fails
+     *   1    2 ns                 376 mV                        flaky
+     *   2    4 ns                 707 mV                        works, attenuated
+     *   3    8 ns                 984 mV                        stable
+     *   5    32 ns                989 mV                        stable
+     *   7    128 ns               989 mV                        stable
+     *
+     * The attenuation below tb=3 is phase blur, not bandwidth: the traces stay
+     * smooth (second-difference roughness 0.001) while losing amplitude, which
+     * is what averaging misaligned bins does. tb >= 3 is the usable range. */
     int saved_dp           = dev->trigger_delay_pct;
-    dev->trigger_delay_pct = 100;
+    dev->trigger_delay_pct = 0;
 
     /* Convert trigger threshold from SDK 16-bit signed counts to mV on the
      * source channel's range. */
     float range_mv = (float)get_range_mv(dev->ch[want_ch].range);
     float thr_mv   = (float)dev->trigger_thr_sdk * range_mv / 32768.0f;
 
-    /* Trigger sits near start of block (dp=+100 → trig_idx=0). Look for
-     * the first edge in the first few samples. */
-    int trig_idx = 2;
+    /* delay_pct 0 puts the trigger at the middle of the returned block, so
+     * that is where the crossing is; estimate_trigger_phase searches +-32
+     * samples around it. */
+    int trig_idx = n_samples / 2;
 
     float   *buf_a = NULL, *buf_b = NULL;
     float   *acc_a = NULL, *acc_b = NULL;
