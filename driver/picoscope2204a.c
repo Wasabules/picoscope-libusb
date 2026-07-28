@@ -2985,9 +2985,37 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
         apply_cal_table(dev, &dev->builtin_cal);
         dev->using_eeprom_cal = false;
     }
-    printf("  Calibration: built-in reference table%s\n",
-           dev->eeprom_cal.valid
-           ? " (per-unit EEPROM table decoded, available on request)" : "");
+
+    /* Gains yes, stored DC offsets no.
+     *
+     * Both tables carry the same ~-3.5 ADC counts of DC offset (EEPROM -3.06
+     * to -3.85, built-in -2.85 to -3.83), and applying it walks us away from
+     * the SDK rather than towards it. Measured on a flat input, difference
+     * from the SDK in ADC counts:
+     *
+     *   range      200 mV  500 mV   1 V     2 V     5 V
+     *   applied    +4.44   +4.04   +4.22   +4.51   +4.33
+     *   not        +0.43   +0.13   -0.07   +1.17   +0.04
+     *
+     * A constant in counts across ranges is the signature of an ADC
+     * zero-point term, and the device evidently already compensates it: the
+     * stored word describes a correction that has been made, not one still
+     * owed. Applying it a second time is what the +4.3 is. Flipping the sign
+     * is not the answer either -- that lands at -3.5.
+     *
+     * Caveat worth keeping: with no 0 V reference available, this says we now
+     * agree with the SDK to well under a count, not that either of us is
+     * absolutely right. Agreeing with the factory-calibrated reference is the
+     * goal here.
+     *
+     * The mechanism stays: ps2204a_set_range_calibration() still installs an
+     * offset, and ps2204a_calibrate_dc_offset() still measures one against a
+     * shorted input, which is the honest way to get an absolute zero. */
+    for (int r = 0; r < PS_RANGE_COUNT; r++) dev->cal_offset_mv[r] = 0.0f;
+    printf("  Calibration: %s\n",
+           dev->using_eeprom_cal
+           ? "per-unit factory EEPROM trim"
+           : "built-in reference table (EEPROM did not parse)");
 
     /* Default trigger (auto/free-run) */
     build_block_trigger(dev->trigger_cmd);

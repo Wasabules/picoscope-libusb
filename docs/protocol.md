@@ -472,6 +472,27 @@ Reconstructing the hand-measured table from the EEPROM alone lands within
 1.1 % on average and 0.1 % on several ranges — inside the noise of the
 original measurements.
 
+**But they must not be applied to the samples.** Both tables carry the same
+≈ −3.5 ADC counts (EEPROM −3.06…−3.85, built-in −2.85…−3.83), and applying
+it walks away from the SDK instead of towards it. Difference from the SDK on
+a flat input, in ADC counts:
+
+| range | 200 mV | 500 mV | 1 V | 2 V | 5 V |
+|-------|--------|--------|-----|-----|-----|
+| offset applied | +4.44 | +4.04 | +4.22 | +4.51 | +4.33 |
+| offset not applied | +0.43 | +0.13 | −0.07 | +1.17 | +0.04 |
+
+A constant in counts across ranges is the signature of an ADC zero-point
+term, and the device evidently already compensates it — the stored word
+records a correction that has been made, not one still owed. Applying it a
+second time is exactly the +4.3. Flipping the sign is not the answer either;
+that lands at −3.5.
+
+With no 0 V reference available this says we agree with the SDK to well under
+a count, not that either is absolutely right. `ps2204a_calibrate_dc_offset()`
+against a shorted input remains the honest way to get an absolute zero, and
+`ps2204a_set_range_calibration()` still installs one.
+
 **Gains — confirmed, and the block assignment was right.**
 
 This section previously said the opposite. The test behind that was to ask
