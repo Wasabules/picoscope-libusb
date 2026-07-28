@@ -4104,8 +4104,8 @@ bool ps2204a_is_streaming(ps2204a_device_t *dev)
  *
  * Hardware convention, reverse-engineered from SDK USB captures:
  *   - center (DC level) = 2030
- *   - half_amp counts   = round(pkpk_uv * 475 / 1_000_000)
- *     (500 mVpp→237, 1 Vpp→475, 2 Vpp→950 — linear in pkpk)
+ *   - half_amp counts   = round(pkpk_uv * 472 / 1_000_000)
+ *     (500 mVpp→235, 1 Vpp→471, 2 Vpp→944 — linear in pkpk)
  *   - 4096 samples per cycle
  *   - For DC (wave=5) or freq=0 we fill a flat table (all 2030) which
  *     silences the siggen output. */
@@ -4114,10 +4114,35 @@ static void build_awg_lut(uint8_t *lut, ps_wave_t type, uint32_t pkpk_uv,
 {
     const int N = 4096;
     const int CENTER_DEFAULT = 2030;
-    /* Amplitude: 297 counts per 1 Vpp (0.625 calibration factor applied).
+    /* Amplitude: 472 counts per 1 Vpp. Read straight off the SDK's own LUT
+     * uploads, captured with usbmon (kernel-level, so nothing can escape it)
+     * while sweeping ps2000_set_sig_gen_built_in:
+     *
+     *   requested pk-pk    250 mV   500 mV    1 V     2 V     3 V     4 V
+     *   SDK half-amplitude    117      235    471   943.5    1415    1888
+     *
+     * The span (max-min) converges on pkpk_uv * 944 / 1e6 — 4 Vpp gives
+     * exactly 3776 — with the smaller requests losing a count or two because
+     * the sine's peak never lands on a sample. Hence 472 for the half.
+     *
+     * This used to be 297: the documented 475 with a 0.625 "calibration
+     * factor" on top. That factor was cancelling a scaling error elsewhere,
+     * and the cost was real — the DAC genuinely under-drove by 1.6x, so the
+     * generator put out 1.25 Vpp when asked for 2. Measured on the wire, our
+     * LUT half-amplitude was 594 counts against the SDK's 943, and the ADC
+     * saw 35.5 counts of signal against the SDK's 56.5 (ratio 1.59 both
+     * ways). A shallower waveform crosses the trigger threshold with a
+     * proportionally lower slew rate, and trigger jitter is noise divided by
+     * slew rate — which is why our trigger was about twice as loose as the
+     * SDK's on the same 10 kHz stimulus.
+     *
+     * Not reproduced: the SDK biases the centre up by roughly half_amp/128
+     * (2030 at DC, 2045 at 4 Vpp). That is a 0.8 % asymmetry with no
+     * mechanism established yet, so it is left alone rather than guessed at.
+     *
      * Same scale applies to DC offset (both go through the same DAC). */
-    int half_amp = (int)((pkpk_uv * 297ULL + 500000ULL) / 1000000ULL);
-    int offset_counts = (int)((int64_t)offset_uv * 297 / 500000);
+    int half_amp = (int)((pkpk_uv * 472ULL + 500000ULL) / 1000000ULL);
+    int offset_counts = (int)((int64_t)offset_uv * 472 / 500000);
     /* The DAC inverts LUT values relative to output: higher LUT value ⇒
      * lower output voltage. So to produce a POSITIVE voltage offset we
      * must SHIFT THE CENTER DOWN in LUT space. Similarly for asymmetric
