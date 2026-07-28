@@ -238,6 +238,41 @@ idle = 0x7c (channel A) | 0x81 (channel B)
 
 `cmd2[21]` = `0x09` rising, `0x12` falling.
 
+### Pre-trigger sample count
+
+A triggered block splits in two and the device has to be told both halves:
+
+| field        | carries                                            |
+|--------------|----------------------------------------------------|
+| `85 08 85`   | post-trigger sample count                          |
+| `85 08 93`   | timebase constant **plus** pre-trigger sample count |
+
+Traced across delays and sample counts, `85 08 93` minus the pre-trigger
+count is constant per timebase and equals the lookup table above:
+
+| delay | n | tb | post | `85 08 93` | pre | difference |
+|-------|------|----|------|------|------|-----|
+| 0   | 2000 | 5 | 2000 | 343  | 0    | 343 |
+| −50 | 2000 | 5 | 1000 | 1343 | 1000 | 343 |
+| −75 | 2000 | 5 | 500  | 1843 | 1500 | 343 |
+| −50 | 4000 | 5 | 2000 | 2343 | 2000 | 343 |
+| −50 | 2000 | 7 | 1000 | 1109 | 1000 | 109 |
+
+Sending the bare timebase constant asks for **zero** pre-trigger samples.
+The device then only guarantees what follows the trigger, and anything a
+parser takes from before it is unmanaged circular-buffer residue. Measured
+as overlay spread across eight captures, this driver against the SDK on the
+same stimulus:
+
+| stimulus | before | after | official SDK |
+|----------|--------|-------|--------------|
+| square 150 Hz | 3.5 mV | 3.7 mV | 4.0 mV |
+| square 2 kHz  | 59.2 mV | 5.5 mV | — |
+| square 10 kHz | 23.1 mV | 21.4 mV | 12.8 mV |
+| sine 150 Hz   | 5.5 mV | 5.2 mV | 6.0 mV |
+| sine 2 kHz    | 71.2 mV | 7.1 mV | — |
+| sine 10 kHz   | 79.2 mV | 10.8 mV | 5.9 mV |
+
 ### Trigger position in the returned block
 
 The device overshoots the post-trigger sample count it is given: the event

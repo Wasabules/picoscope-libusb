@@ -572,6 +572,7 @@ static void build_capture_cmd1(ps2204a_device_t *dev, uint8_t *cmd,
 
     uint8_t chan_hi, chan_lo;
     get_tb_chan_bytes(timebase, &chan_hi, &chan_lo);
+    int chan_base = (chan_hi << 8) | chan_lo;
 
     int buf_val = (1 << timebase);
     if (buf_val > 0xFFFF) buf_val = 0xFFFF;
@@ -591,16 +592,37 @@ static void build_capture_cmd1(ps2204a_device_t *dev, uint8_t *cmd,
      * buffer, so the effect of delay_pct is bounded by what that slicing
      * lets us see — fine for ±50 %, imperfect at the extremes (until the
      * parser grows a trigger-position-aware extraction). */
+    /* The block splits into pre- and post-trigger halves, and the device has
+     * to be told both:
+     *   `85 08 85` carries the post-trigger count,
+     *   `85 08 93` carries the timebase constant PLUS the pre-trigger count.
+     *
+     * Sending the bare timebase constant — which is what this did — asks for
+     * zero pre-trigger samples. The device then only guarantees what follows
+     * the trigger, and everything the parser took from before it was unmanaged
+     * circular-buffer residue. On a signal whose pre-trigger half carries
+     * detail that showed up as jitter: 79 mV of overlay spread on a 10 kHz
+     * sine where the SDK, asking properly, gets 5.9 mV.
+     *
+     * Confirmed by tracing ps2000_set_trigger across delays and sample counts:
+     * `85 08 93` minus the pre-trigger count is constant per timebase (343 at
+     * tb=5, 109 at tb=7), matching the existing lookup table. */
     int post_n = n;
+    int pre_n  = 0;
     if (dev && dev->trigger_armed) {
         int dp = dev->trigger_delay_pct;
         if (dp < -100) dp = -100;
         if (dp >  100) dp = 100;
-        post_n = (n * (100 + dp)) / 100;
-        if (post_n < 0) post_n = 0;
-        /* The on-chip buffer is 16 KB, so we can ask for up to ~16000 samples
-         * after the trigger. Larger values get truncated at the device. */
+        pre_n  = (n * (100 - dp)) / 200;
+        if (pre_n < 0) pre_n = 0;
+        if (pre_n > n) pre_n = n;
+        post_n = n - pre_n;
+        /* The on-chip buffer is 16 KB, so neither half can exceed it. */
         if (post_n > 16000) post_n = 16000;
+        if (pre_n  > 16000) pre_n  = 16000;
+        chan_base += pre_n;
+        chan_hi = (chan_base >> 8) & 0xFF;
+        chan_lo =  chan_base       & 0xFF;
     }
     uint8_t cnt_hi = (post_n >> 8) & 0xFF;
     uint8_t cnt_lo =  post_n       & 0xFF;
@@ -3372,22 +3394,24 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
 
     if (both) {
         int post = dev->trigger_armed
-                   ? (n * (100 + dev->trigger_delay_pct)) / 100
+                   ? n - (n * (100 - dev->trigger_delay_pct)) / 200
                    : 0;
         int dp = dev->trigger_armed ? dev->trigger_delay_pct : 0;
         got = parse_waveform_dual(raw, raw_n, n, post, dp,
                                   range_a_mv, range_b_mv, buf_a, buf_b,
                                   &clip_a, &clip_b);
     } else if (dev->ch[0].enabled && buf_a) {
+        /* Must match what build_capture_cmd1 told the device. */
         int post = dev->trigger_armed
-                   ? (n * (100 + dev->trigger_delay_pct)) / 100
+                   ? n - (n * (100 - dev->trigger_delay_pct)) / 200
                    : n;
         int dp = dev->trigger_armed ? dev->trigger_delay_pct : -100;
         got = parse_waveform_ex(raw, raw_n, n, post, dp, range_a_mv, buf_a,
                                 &clip_a);
     } else if (dev->ch[1].enabled && buf_b) {
+        /* Must match what build_capture_cmd1 told the device. */
         int post = dev->trigger_armed
-                   ? (n * (100 + dev->trigger_delay_pct)) / 100
+                   ? n - (n * (100 - dev->trigger_delay_pct)) / 200
                    : n;
         int dp = dev->trigger_armed ? dev->trigger_delay_pct : -100;
         got = parse_waveform_ex(raw, raw_n, n, post, dp, range_b_mv, buf_b,
