@@ -49,6 +49,19 @@
 #define ADC_CENTER      128
 #define ADC_HALF_RANGE  128.0f
 
+/* ps_range_t starts at PS_50MV = 2 to match the PicoSDK ps2000 enum, while
+ * every per-range table here is indexed 0..PS_RANGE_COUNT-1. Route all lookups
+ * through range_index() so that offset lives in exactly one place. */
+#define PS_RANGE_FIRST  PS_50MV
+#define PS_RANGE_COUNT  9
+
+/* Table index for `range`, or -1 if the range is outside the supported set. */
+static inline int range_index(ps_range_t range)
+{
+    int idx = (int)range - (int)PS_RANGE_FIRST;
+    return (idx >= 0 && idx < PS_RANGE_COUNT) ? idx : -1;
+}
+
 #define TIMEOUT_CMD     5000
 #define TIMEOUT_RESP    500
 #define TIMEOUT_DATA    15000
@@ -100,6 +113,15 @@ static const int RANGE_MV[] = {
     /*   10V */ 10000,
     /*   20V */ 20000
 };
+
+/* Every per-range table must stay in lockstep with ps_range_t. Catching a
+ * mismatch here beats reading past the end of one of them at runtime. */
+_Static_assert(sizeof(PGA_TABLE) / sizeof(PGA_TABLE[0]) == PS_RANGE_COUNT,
+               "PGA_TABLE must have one entry per ps_range_t value");
+_Static_assert(sizeof(RANGE_MV) / sizeof(RANGE_MV[0]) == PS_RANGE_COUNT,
+               "RANGE_MV must have one entry per ps_range_t value");
+_Static_assert((int)PS_20V - (int)PS_RANGE_FIRST + 1 == PS_RANGE_COUNT,
+               "PS_RANGE_COUNT must span PS_50MV..PS_20V");
 
 /* Timebase channel bytes for tb=0..10 */
 static const uint8_t TB_CHAN[][2] = {
@@ -199,8 +221,8 @@ struct ps2204a_device {
      * multiplicative correction (1.0 = no correction). Default 0.0 / 1.0.
      * Populate manually via ps2204a_set_range_calibration() or let the
      * driver fit them automatically on ps2204a_calibrate_dc_offset(). */
-    float cal_offset_mv[9];
-    float cal_gain[9];
+    float cal_offset_mv[PS_RANGE_COUNT];
+    float cal_gain[PS_RANGE_COUNT];
     uint8_t eeprom_raw[256];   /* 4 × 64-byte pages; read at open */
 
     /* Enhanced resolution: moving-average box filter with N = 4^extra_bits
@@ -420,8 +442,8 @@ static void flush_buffers(ps2204a_device_t *dev)
 /* Get PGA table entry (returns defaults for out-of-range) */
 static pga_entry_t get_pga(ps_range_t range)
 {
-    int idx = (int)range - 2;
-    if (idx >= 0 && idx < 9) return PGA_TABLE[idx];
+    int idx = range_index(range);
+    if (idx >= 0) return PGA_TABLE[idx];
     pga_entry_t def = {0, 7, 0};
     return def;
 }
@@ -429,8 +451,8 @@ static pga_entry_t get_pga(ps_range_t range)
 /* Get range in mV */
 static int get_range_mv(ps_range_t range)
 {
-    int idx = (int)range - 2;
-    if (idx >= 0 && idx < 9) return RANGE_MV[idx];
+    int idx = range_index(range);
+    if (idx >= 0) return RANGE_MV[idx];
     return 5000;
 }
 
@@ -1297,26 +1319,28 @@ static int find_valid_segment(const uint8_t *raw, int raw_len,
     const uint8_t *buf = raw + 2;
     int buf_len = raw_len - 2;
 
-    int first_nz = -1, last_nz = -1;
-    for (int i = 0; i < buf_len; i++) {
-        if (buf[i] != 0) {
-            if (first_nz < 0) first_nz = i;
-            last_nz = i;
-        }
-    }
+    /* Only the LEADING run of zeros is padding. 0x00 is a legal sample value
+     * (negative full scale on an 8-bit ADC centred at 128), so trailing and
+     * interior zeros are real data and must never be trimmed.
+     *
+     * Trimming the tail — as this used to — shortened the segment, which both
+     * shifted the trigger position reported by parse_waveform_ex() and, because
+     * the dual-channel layout is B,A,B,A anchored on the end of the transfer,
+     * inverted the channel assignment whenever an odd number of trailing
+     * samples happened to sit on the negative rail.
+     *
+     * A clipped *leading* edge remains indistinguishable from padding, but that
+     * only costs a little history: every parser anchors on the tail. */
+    int first_nz = 0;
+    while (first_nz < buf_len && buf[first_nz] == 0) first_nz++;
 
-    if (first_nz < 0) {
+    if (first_nz >= buf_len) {   /* nothing but padding */
         *out_ptr = buf;
         return buf_len;
     }
 
-    int valid_len = last_nz - first_nz + 1;
-    if (valid_len >= buf_len) {
-        *out_ptr = buf;
-        return buf_len;
-    }
     *out_ptr = buf + first_nz;
-    return valid_len;
+    return buf_len - first_nz;
 }
 
 /* Scale [start..start+n] uint8 samples into mV float array. */
@@ -1392,7 +1416,7 @@ static void apply_moving_average(float *buf, int n, int N)
     }
 
     /* Scratch buffer — we can't write back while still reading later
-     * window positions. Stack-allocate up to 64 KB, heap for larger. */
+     * window positions. Stack-allocate up to 8 KB, heap for larger. */
     float stack_tmp[2048];
     float *tmp = (n <= (int)(sizeof(stack_tmp)/sizeof(stack_tmp[0])))
                  ? stack_tmp
@@ -1417,13 +1441,21 @@ static void apply_moving_average(float *buf, int n, int N)
     if (tmp != stack_tmp) free(tmp);
 }
 
+/* Moving-average tap count implied by the configured resolution enhancement
+ * (4^extra_bits). Returns 1 when the feature is off, which apply_moving_average
+ * treats as a no-op. extra_bits is validated to 0..4, so this tops out at 256. */
+static int res_taps(const ps2204a_device_t *dev)
+{
+    if (!dev || dev->res_extra_bits <= 0) return 1;
+    int n = 1;
+    for (int i = 0; i < dev->res_extra_bits; i++) n *= 4;
+    return n;
+}
+
 /* Convenience wrapper that reads extra_bits from the device state. */
 static void apply_res_enhancement(ps2204a_device_t *dev, float *buf, int n)
 {
-    if (!dev || dev->res_extra_bits <= 0) return;
-    int N = 1;
-    for (int i = 0; i < dev->res_extra_bits; i++) N *= 4;
-    apply_moving_average(buf, n, N);
+    apply_moving_average(buf, n, res_taps(dev));
 }
 
 /* Dual-channel parse: tail-interleaved layout.
@@ -1451,7 +1483,11 @@ static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
         n_samples = valid_len / 2;
         pair_bytes = 2 * n_samples;
     }
-    const uint8_t *tail = valid + (valid_len - pair_bytes);
+    /* Pairs are anchored on the END of the transfer: the final byte of the
+     * buffer is always the A sample of the last pair. Deriving `tail` from the
+     * end rather than from the start of the payload keeps the B/A assignment
+     * independent of how much padding preceded the data. */
+    const uint8_t *tail = (valid + valid_len) - pair_bytes;
 
     float scale_a = range_a_mv / ADC_HALF_RANGE;
     float scale_b = range_b_mv / ADC_HALF_RANGE;
@@ -1639,6 +1675,22 @@ static void ring_write(float *ring, size_t cap, size_t wp,
     }
 }
 
+/* Copy the `n` samples that end at absolute write position `end_pos` out of a
+ * circular buffer, unwrapping as needed. Caller must hold stream_mutex. */
+static void ring_read(const float *ring, size_t cap, size_t end_pos,
+                      int n, float *out)
+{
+    if (!ring || !out || n <= 0 || cap == 0) return;
+    size_t start = (end_pos - (size_t)n) % cap;
+    if (start + (size_t)n <= cap) {
+        memcpy(out, &ring[start], (size_t)n * sizeof(float));
+    } else {
+        size_t first = cap - start;
+        memcpy(out, &ring[start], first * sizeof(float));
+        memcpy(&out[first], &ring[0], ((size_t)n - first) * sizeof(float));
+    }
+}
+
 static void *fast_streaming_thread(void *arg)
 {
     ps2204a_device_t *dev = (ps2204a_device_t *)arg;
@@ -1730,9 +1782,9 @@ static void *fast_streaming_thread(void *arg)
          * calibration so a saturated ADC byte doesn't extrapolate past the
          * screen rails when gain > 1. */
         {
-            int ida = (int)dev->ch[0].range - 2;
-            int idb = (int)dev->ch[1].range - 2;
-            if (ida >= 0 && ida < 9) {
+            int ida = range_index(dev->ch[0].range);
+            int idb = range_index(dev->ch[1].range);
+            if (ida >= 0) {
                 float off = dev->cal_offset_mv[ida], g = dev->cal_gain[ida];
                 if (off != 0.0f || g != 1.0f) {
                     for (int k = 0; k < got; k++) {
@@ -1743,7 +1795,7 @@ static void *fast_streaming_thread(void *arg)
                     }
                 }
             }
-            if (both && idb >= 0 && idb < 9) {
+            if (both && idb >= 0) {
                 float off = dev->cal_offset_mv[idb], g = dev->cal_gain[idb];
                 if (off != 0.0f || g != 1.0f) {
                     for (int k = 0; k < got; k++) {
@@ -2157,7 +2209,7 @@ static void LIBUSB_CALL sdk_stream_cb(struct libusb_transfer *xfer)
     int pairs = n / 2;
     /* Layout: byte[2k]=B sample, byte[2k+1]=A sample (as observed in trace). */
     for (int i = 0; i < pairs; i++) {
-        if (st->ch_b_enabled || true) {
+        if (st->ch_b_enabled) {
             float raw_b = ((float)src[2*i    ] - ADC_CENTER) * st->scale_b;
             st->tmp_b[i] = (raw_b - st->offset_b_mv) * st->gain_b;
         }
@@ -2170,7 +2222,10 @@ static void LIBUSB_CALL sdk_stream_cb(struct libusb_transfer *xfer)
         ring_write(dev->ring_a, dev->ring_capacity, dev->ring_write_pos,
                    st->tmp_a, pairs);
     }
-    if (dev->ring_b) {
+    /* Gate on ch_b_enabled as well as ring_b: tmp_b is only filled when B is
+     * on, so publishing it on the strength of the ring pointer alone would
+     * leak uninitialised scratch if the two ever disagreed. */
+    if (st->ch_b_enabled && dev->ring_b) {
         ring_write(dev->ring_b, dev->ring_capacity, dev->ring_write_pos,
                    st->tmp_b, pairs);
     }
@@ -2220,12 +2275,12 @@ static void *sdk_streaming_thread(void *arg)
     state.ch_b_enabled = dev->ch[1].enabled;
     state.scale_a = (float)get_range_mv(dev->ch[0].range) / ADC_HALF_RANGE;
     state.scale_b = (float)get_range_mv(dev->ch[1].range) / ADC_HALF_RANGE;
-    int ia = (int)dev->ch[0].range - 2;
-    int ib = (int)dev->ch[1].range - 2;
-    state.offset_a_mv = (ia >= 0 && ia < 9) ? dev->cal_offset_mv[ia] : 0.0f;
-    state.offset_b_mv = (ib >= 0 && ib < 9) ? dev->cal_offset_mv[ib] : 0.0f;
-    state.gain_a      = (ia >= 0 && ia < 9) ? dev->cal_gain[ia]      : 1.0f;
-    state.gain_b      = (ib >= 0 && ib < 9) ? dev->cal_gain[ib]      : 1.0f;
+    int ia = range_index(dev->ch[0].range);
+    int ib = range_index(dev->ch[1].range);
+    state.offset_a_mv = (ia >= 0) ? dev->cal_offset_mv[ia] : 0.0f;
+    state.offset_b_mv = (ib >= 0) ? dev->cal_offset_mv[ib] : 0.0f;
+    state.gain_a      = (ia >= 0) ? dev->cal_gain[ia]      : 1.0f;
+    state.gain_b      = (ib >= 0) ? dev->cal_gain[ib]      : 1.0f;
 
     state.tmp_a = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
     state.tmp_b = (float *)malloc((SDK_STREAM_XFER_FIXED / 2) * sizeof(float));
@@ -2493,7 +2548,7 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
      * when the input is at 0 V, matching the SDK's behaviour to within
      * ~10 mV on the worst range. Individual units will vary a little;
      * ps2204a_calibrate_dc_offset() will override these on demand. */
-    static const float FACTORY_OFFSET_MV[9] = {
+    static const float FACTORY_OFFSET_MV[PS_RANGE_COUNT] = {
         /* PS_50MV  */    -1.16f,
         /* PS_100MV */    -2.23f,
         /* PS_200MV */    -5.89f,
@@ -2507,7 +2562,7 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
     /* Factory gain table, measured 2026-04-17 with a benchtop lab supply
      * and a DMM reference across mid-range DC inputs (~50–70 % of each
      * range). These correct the analog-chain gain error per PGA config. */
-    static const float FACTORY_GAIN[9] = {
+    static const float FACTORY_GAIN[PS_RANGE_COUNT] = {
         /* PS_50MV  */ 1.472213f,   /* reference: 28 mV */
         /* PS_100MV */ 1.159257f,   /* reference: 80 mV */
         /* PS_200MV */ 1.160788f,   /* reference: 119 mV */
@@ -2518,7 +2573,7 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
         /* PS_10V   */ 1.119147f,   /* reference: 7.005 V */
         /* PS_20V   */ 1.187060f,   /* reference: 14.000 V */
     };
-    for (int r = 0; r < 9; r++) {
+    for (int r = 0; r < PS_RANGE_COUNT; r++) {
         dev->cal_offset_mv[r] = FACTORY_OFFSET_MV[r];
         dev->cal_gain[r] = FACTORY_GAIN[r];
     }
@@ -3092,9 +3147,9 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
      * 1.187 gain), which would show spikes outside the screen rails and
      * trigger false-clip indicators in the GUI. Clamping keeps the
      * display honest and ensures the clip-check logic works as intended. */
-    int idx_a = (int)dev->ch[0].range - 2;
-    int idx_b = (int)dev->ch[1].range - 2;
-    if (buf_a && dev->ch[0].enabled && idx_a >= 0 && idx_a < 9) {
+    int idx_a = range_index(dev->ch[0].range);
+    int idx_b = range_index(dev->ch[1].range);
+    if (buf_a && dev->ch[0].enabled && idx_a >= 0) {
         float off = dev->cal_offset_mv[idx_a];
         float g   = dev->cal_gain[idx_a];
         float r   = (float)range_a_mv;
@@ -3107,7 +3162,7 @@ ps_status_t ps2204a_capture_block(ps2204a_device_t *dev, int samples,
             }
         }
     }
-    if (buf_b && dev->ch[1].enabled && idx_b >= 0 && idx_b < 9) {
+    if (buf_b && dev->ch[1].enabled && idx_b >= 0) {
         float off = dev->cal_offset_mv[idx_b];
         float g   = dev->cal_gain[idx_b];
         float r   = (float)range_b_mv;
@@ -3506,10 +3561,19 @@ ps_status_t ps2204a_start_streaming_mode(ps2204a_device_t *dev,
     free(dev->ring_b);
     dev->ring_a = (float *)calloc(cap, sizeof(float));
     /* Native mode is single-channel; fast and SDK modes support dual */
-    dev->ring_b = ((mode == PS_STREAM_FAST || mode == PS_STREAM_SDK)
-                   && dev->ch[1].enabled)
-                  ? (float *)calloc(cap, sizeof(float)) : NULL;
-    if (!dev->ring_a) return PS_ERROR_ALLOC;
+    bool want_ring_b = (mode == PS_STREAM_FAST || mode == PS_STREAM_SDK)
+                       && dev->ch[1].enabled;
+    dev->ring_b = want_ring_b ? (float *)calloc(cap, sizeof(float)) : NULL;
+
+    /* Report a failed B ring rather than silently degrading to single-channel:
+     * the caller asked for two channels and would otherwise get one with no
+     * indication why. */
+    if (!dev->ring_a || (want_ring_b && !dev->ring_b)) {
+        free(dev->ring_a); dev->ring_a = NULL;
+        free(dev->ring_b); dev->ring_b = NULL;
+        dev->ring_capacity = 0;
+        return PS_ERROR_ALLOC;
+    }
     dev->ring_capacity = cap;
     dev->ring_write_pos = 0;
 
@@ -3593,6 +3657,21 @@ ps_status_t ps2204a_get_streaming_latest(ps2204a_device_t *dev,
 {
     if (!dev || n <= 0) return PS_ERROR_PARAM;
 
+    const int taps = res_taps(dev);
+
+    /* Scratch for the filter's left-context window, sized for the worst case
+     * and allocated up front: the critical section below must not malloc, and
+     * must not run the O(n) filter, or it would stall the streaming thread.
+     * taps is capped at 256 by set_resolution_enhancement, so max_pad ≤ 128.
+     * A failed allocation is not fatal — we fall back to per-chunk filtering. */
+    const int max_pad = (taps > 1) ? taps / 2 : 0;
+    float *scratch_a = NULL, *scratch_b = NULL;
+    if (max_pad > 0) {
+        size_t bytes = (size_t)(n + max_pad) * sizeof(float);
+        if (buf_a) scratch_a = (float *)malloc(bytes);
+        if (buf_b) scratch_b = (float *)malloc(bytes);
+    }
+
     pthread_mutex_lock(&dev->stream_mutex);
 
     size_t wp = dev->ring_write_pos;
@@ -3600,6 +3679,7 @@ ps_status_t ps2204a_get_streaming_latest(ps2204a_device_t *dev,
 
     if (wp == 0 || cap == 0) {
         pthread_mutex_unlock(&dev->stream_mutex);
+        free(scratch_a); free(scratch_b);
         if (actual) *actual = 0;
         return PS_OK;
     }
@@ -3607,34 +3687,58 @@ ps_status_t ps2204a_get_streaming_latest(ps2204a_device_t *dev,
     int avail = (int)(wp < (size_t)n ? wp : (size_t)n);
     if ((size_t)avail > cap) avail = (int)cap;
 
-    size_t start = (wp - avail) % cap;
-
-    if (buf_a && dev->ring_a) {
-        if (start + (size_t)avail <= cap) {
-            memcpy(buf_a, &dev->ring_a[start], avail * sizeof(float));
-        } else {
-            size_t first = cap - start;
-            memcpy(buf_a, &dev->ring_a[start], first * sizeof(float));
-            memcpy(&buf_a[first], &dev->ring_a[0],
-                   (avail - first) * sizeof(float));
-        }
+    /* Resolution enhancement is a centred moving average. Filtering each poll's
+     * chunk in isolation would re-seed the window from replicated edges at every
+     * chunk boundary, stamping a discontinuity into the stream at the poll rate.
+     * Pull `pad` samples of genuine history in front of the requested window,
+     * filter across the join, then hand back only the requested part.
+     *
+     * The newest `taps/2` samples still lack right-hand context, but that edge
+     * is the live end of the stream — no amount of history can fill it. */
+    int pad = 0;
+    if (max_pad > 0) {
+        pad = max_pad;
+        size_t history   = wp - (size_t)avail;     /* older samples ever written */
+        size_t ring_room = cap - (size_t)avail;    /* older samples still resident */
+        if ((size_t)pad > history)   pad = (int)history;
+        if ((size_t)pad > ring_room) pad = (int)ring_room;
     }
 
+    /* Critical section: copies only. */
+    int pad_a = (buf_a && dev->ring_a && scratch_a) ? pad : 0;
+    int pad_b = (buf_b && dev->ring_b && scratch_b) ? pad : 0;
+
+    if (buf_a && dev->ring_a) {
+        if (pad_a > 0) ring_read(dev->ring_a, cap, wp, pad_a + avail, scratch_a);
+        else           ring_read(dev->ring_a, cap, wp, avail, buf_a);
+    }
     if (buf_b && dev->ring_b) {
-        if (start + (size_t)avail <= cap) {
-            memcpy(buf_b, &dev->ring_b[start], avail * sizeof(float));
-        } else {
-            size_t first = cap - start;
-            memcpy(buf_b, &dev->ring_b[start], first * sizeof(float));
-            memcpy(&buf_b[first], &dev->ring_b[0],
-                   (avail - first) * sizeof(float));
-        }
+        if (pad_b > 0) ring_read(dev->ring_b, cap, wp, pad_b + avail, scratch_b);
+        else           ring_read(dev->ring_b, cap, wp, avail, buf_b);
     }
 
     pthread_mutex_unlock(&dev->stream_mutex);
 
-    if (buf_a) apply_res_enhancement(dev, buf_a, avail);
-    if (buf_b) apply_res_enhancement(dev, buf_b, avail);
+    /* Filtering happens outside the lock. */
+    if (buf_a && dev->ring_a) {
+        if (pad_a > 0) {
+            apply_moving_average(scratch_a, pad_a + avail, taps);
+            memcpy(buf_a, &scratch_a[pad_a], (size_t)avail * sizeof(float));
+        } else {
+            apply_res_enhancement(dev, buf_a, avail);
+        }
+    }
+    if (buf_b && dev->ring_b) {
+        if (pad_b > 0) {
+            apply_moving_average(scratch_b, pad_b + avail, taps);
+            memcpy(buf_b, &scratch_b[pad_b], (size_t)avail * sizeof(float));
+        } else {
+            apply_res_enhancement(dev, buf_b, avail);
+        }
+    }
+
+    free(scratch_a);
+    free(scratch_b);
 
     if (actual) *actual = avail;
     return PS_OK;
@@ -4074,8 +4178,8 @@ ps_status_t ps2204a_set_range_calibration(ps2204a_device_t *dev,
                                           float offset_mv, float gain)
 {
     if (!dev) return PS_ERROR_PARAM;
-    int idx = (int)range - 2;
-    if (idx < 0 || idx >= 9) return PS_ERROR_PARAM;
+    int idx = range_index(range);
+    if (idx < 0) return PS_ERROR_PARAM;
     dev->cal_offset_mv[idx] = offset_mv;
     dev->cal_gain[idx] = (gain <= 0) ? 1.0f : gain;
     return PS_OK;
@@ -4086,8 +4190,8 @@ ps_status_t ps2204a_get_range_calibration(ps2204a_device_t *dev,
                                           float *offset_mv, float *gain)
 {
     if (!dev) return PS_ERROR_PARAM;
-    int idx = (int)range - 2;
-    if (idx < 0 || idx >= 9) return PS_ERROR_PARAM;
+    int idx = range_index(range);
+    if (idx < 0) return PS_ERROR_PARAM;
     if (offset_mv) *offset_mv = dev->cal_offset_mv[idx];
     if (gain)      *gain      = dev->cal_gain[idx];
     return PS_OK;
@@ -4120,15 +4224,15 @@ ps_status_t ps2204a_calibrate_dc_offset(ps2204a_device_t *dev)
         if (dev->ch[0].enabled) {
             double sum = 0;
             for (int i = 0; i < got; i++) sum += buf_a[i];
-            int idx = (int)dev->ch[0].range - 2;
-            if (idx >= 0 && idx < 9)
+            int idx = range_index(dev->ch[0].range);
+            if (idx >= 0)
                 dev->cal_offset_mv[idx] = (float)(sum / got);
         }
         if (dev->ch[1].enabled) {
             double sum = 0;
             for (int i = 0; i < got; i++) sum += buf_b[i];
-            int idx = (int)dev->ch[1].range - 2;
-            if (idx >= 0 && idx < 9)
+            int idx = range_index(dev->ch[1].range);
+            if (idx >= 0)
                 dev->cal_offset_mv[idx] = (float)(sum / got);
         }
     }

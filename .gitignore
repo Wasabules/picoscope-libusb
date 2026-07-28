@@ -51,6 +51,7 @@ driver/*.a
 driver/build/
 tools/firmware-extractor/libps_intercept.so
 driver/test_driver
+driver/test_parse
 driver/calibrate_ranges
 driver/calibrate_siggen
 driver/dump_eeprom

@@ -9,13 +9,18 @@ LIB_SRC = picoscope2204a.c
 LIB_HDR = picoscope2204a.h
 LIB_OBJ = picoscope2204a.o
 
-# Test program
+# Test programs
 TEST = test_driver
 TEST_SRC = test_driver.c
 
-.PHONY: all clean test
+# Unit tests for the pure parsing / DSP helpers. Includes the .c directly to
+# reach its statics, so it needs no device and runs anywhere.
+UNIT = test_parse
+UNIT_SRC = test_parse.c
 
-all: $(LIB) $(LIB_A) $(TEST)
+.PHONY: all clean test unit
+
+all: $(LIB) $(LIB_A) $(TEST) $(UNIT)
 
 $(LIB): $(LIB_SRC) $(LIB_HDR)
 	$(CC) -shared -fPIC $(CFLAGS) -o $@ $(LIB_SRC) $(LDFLAGS)
@@ -36,5 +41,12 @@ $(TEST): $(TEST_SRC) $(LIB)
 test: $(TEST)
 	sudo LD_LIBRARY_PATH=. ./$(TEST)
 
+# Unit tests — no hardware, no root.
+$(UNIT): $(UNIT_SRC) $(LIB_SRC) $(LIB_HDR)
+	$(CC) $(CFLAGS) -o $@ $(UNIT_SRC) $(LDFLAGS)
+
+unit: $(UNIT)
+	./$(UNIT)
+
 clean:
-	rm -f $(LIB) $(LIB_A) $(LIB_OBJ) $(TEST)
+	rm -f $(LIB) $(LIB_A) $(LIB_OBJ) $(TEST) $(UNIT)
