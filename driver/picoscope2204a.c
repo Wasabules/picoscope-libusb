@@ -97,8 +97,15 @@ static void ps_sleep_us(unsigned long us)
 #define TRIG_IDLE_BAND      4
 
 /* Samples the device delivers after the trigger beyond what it was asked for.
- * Measured constant across sample counts and timebases — see parse_waveform_ex. */
+ *
+ * This is not a constant: the first two bytes of every transfer are a status
+ * marker, and they say which of two values applies. Used when the marker is
+ * absent or unrecognised — see trigger_pipeline_samples(). */
 #define TRIG_PIPELINE_SAMPLES 31
+
+/* The two markers observed in block mode, and the overshoot each one means. */
+#define TRIG_MARKER_LONG    0x57a7   /* -> 33 samples */
+#define TRIG_MARKER_SHORT   0x52a2   /* -> 30 samples */
 
 /* Table index for `range`, or -1 if the range is outside the supported set. */
 static inline int range_index(ps_range_t range)
@@ -1485,6 +1492,45 @@ static void apply_cal_table(ps2204a_device_t *dev, const ps_cal_table_t *cal)
     }
 }
 
+/* How far past the requested post-trigger count the record actually ends.
+ *
+ * The two bytes at the head of every transfer are a device status marker, not
+ * samples — find_valid_segment() has always skipped them. They turn out to
+ * carry the piece of trigger information that decides where the record stops,
+ * and treating the overshoot as a fixed 31 was costing us a factor of two in
+ * trigger jitter.
+ *
+ * Established by capturing the official SDK with usbmon and correlating what
+ * ps2000_get_values returned against the raw block on the wire. Every block
+ * aligns at correlation 1.000000 (the returned array is a plain affine map of
+ * the bytes, gain 294.5 about 129), so the offset it picked is exact, not
+ * fitted. Over 90 captures spanning timebases 3/5/7 and five AWG frequencies:
+ *
+ *   marker 0x57a7 -> record ends 33 samples before the transfer end (58 blocks)
+ *   marker 0x52a2 -> record ends 30 samples before the transfer end (32 blocks)
+ *
+ * No other marker value appeared, the mapping never varied with timebase, and
+ * b1 - b0 was 80 throughout. Replaying our own captured blocks with the
+ * marker-derived value reproduces the SDK's jitter almost exactly:
+ *
+ *   stimulus        fixed 31   by marker   SDK library
+ *   square 10 kHz       1.52        0.99          0.82
+ *   sine   10 kHz       1.58        0.50          0.49
+ *   sine    2 kHz       1.37        1.20          1.21
+ *
+ * Unknown markers fall back to 31, which is what the driver did before and
+ * sits between the two known values. */
+static int trigger_pipeline_samples(const uint8_t *raw, int raw_len)
+{
+    if (!raw || raw_len < 2) return TRIG_PIPELINE_SAMPLES;
+    unsigned marker = ((unsigned)raw[0] << 8) | raw[1];
+    switch (marker) {
+    case TRIG_MARKER_LONG:  return 33;
+    case TRIG_MARKER_SHORT: return 30;
+    default:                return TRIG_PIPELINE_SAMPLES;
+    }
+}
+
 static int find_valid_segment(const uint8_t *raw, int raw_len,
                               const uint8_t **out_ptr)
 {
@@ -1581,7 +1627,8 @@ static int parse_waveform_ex(const uint8_t *raw, int raw_len, int n_samples,
     int pre_wanted = (n_samples * (100 - dp)) / 200;
     /* Start of extraction in the valid region, anchored on where the trigger
      * actually is rather than where it was requested. */
-    int trigger_at = valid_len - post_captured - TRIG_PIPELINE_SAMPLES;
+    int trigger_at = valid_len - post_captured
+                     - trigger_pipeline_samples(raw, raw_len);
     if (trigger_at < 0) trigger_at = 0;
     int start = trigger_at - pre_wanted;
     if (start < 0) start = 0;
@@ -1697,7 +1744,13 @@ static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
     if (post_captured > 0) {
         /* Same anchoring as the single-channel path: the event sits
          * TRIG_PIPELINE_SAMPLES earlier than the requested post-trigger count,
-         * and delay_pct decides how much of the window precedes it. */
+         * and delay_pct decides how much of the window precedes it.
+         *
+         * Deliberately still the fixed constant, unlike parse_waveform_ex.
+         * The marker-derived overshoot was measured on single-channel blocks,
+         * where it counts bytes; here the unit is pairs, so 30/33 would have
+         * to be re-measured with both channels enabled before it could be
+         * used. Until then the fallback value is the honest choice. */
         int dp = delay_pct;
         if (dp < -100) dp = -100;
         if (dp >  100) dp =  100;

@@ -276,13 +276,44 @@ same stimulus:
 ### Trigger position in the returned block
 
 The device overshoots the post-trigger sample count it is given: the event
-lands **31 samples earlier** than `valid_len − post_captured`. Measured
-against a square-wave edge, the overshoot is constant at 31 ± 2 samples
-across sample counts 1000–4000 and timebases 3, 5 and 7 — a fixed detection
-pipeline rather than anything that scales. The parser anchors on that
-corrected position, in pair units for dual-channel captures.
+lands earlier than `valid_len − post_captured`. The overshoot is **not** a
+constant — it takes one of two values, and **the first two bytes of the
+transfer say which**.
 
-Measure it with a square wave, not a sine: a slow sine costs the crossing
+Those two bytes are a status marker rather than samples (the parser has
+always skipped them). The mapping:
+
+| marker | overshoot | blocks seen |
+|--------|-----------|-------------|
+| `0x57a7` | 33 samples | 58 |
+| `0x52a2` | 30 samples | 32 |
+
+Established by capturing the official SDK with usbmon and correlating what
+`ps2000_get_values` returned against the raw block on the wire. Every block
+aligns at correlation `1.000000` — the returned array is a plain affine map
+of the raw bytes (gain 294.5 about 129) — so the offset the SDK picked is
+exact rather than fitted. Over 90 captures spanning timebases 3/5/7 and five
+AWG frequencies no third marker appeared, the mapping never varied with
+timebase, and `b1 − b0` was 80 throughout.
+
+An earlier measurement read this as "31 ± 2 samples, constant"; the ±2 was
+the two states averaging out. Treating it as fixed cost a factor of two in
+trigger jitter, since 31 sits between 30 and 33 and is never right:
+
+| stimulus | fixed 31 | by marker | SDK library |
+|----------|----------|-----------|-------------|
+| square 10 kHz | 1.52 | 0.99 | 0.82 |
+| sine 10 kHz | 1.58 | 0.50 | 0.49 |
+| sine 2 kHz | 1.37 | 1.20 | 1.21 |
+
+On hardware after the change, ours vs the SDK: 0.90/0.86, 0.51/0.46,
+1.16/1.15 samples. Unknown markers fall back to 31.
+
+The parser anchors on the corrected position. **Single-channel only so far**:
+the dual-channel path counts pairs rather than bytes, so 30/33 has to be
+re-measured with both channels enabled before it can be used there.
+
+Measure this with a square wave, not a sine: a slow sine costs the crossing
 detector part of an edge to arm, which shows up as tens of samples of
 apparent offset belonging to the measurement rather than the device. The
 same experiment read 84/143/239 samples on a sine and a flat 31 on a square.
