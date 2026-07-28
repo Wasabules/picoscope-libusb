@@ -1417,6 +1417,7 @@
         bind:cycles={etsCycles}
         bind:samples={etsSamples}
         intervalPs={etsIntervalPs}
+        {timebase}
         busy={etsBusy}
         lastCount={etsLastCount}
         {connected}

@@ -614,3 +614,121 @@ JNI_FN(nativeUseEepromCalibration)(JNIEnv *env, jclass cls, jlong handle,
     ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
     return (jint)ps2204a_use_eeprom_calibration(dev, enable == JNI_TRUE);
 }
+
+/* ======================================================================
+ * Remaining driver surface
+ *
+ * These were the functions the shim did not expose. Three of the driver's
+ * public functions stay out on purpose: ps2204a_open() (Android always comes
+ * in through the file-descriptor path, nativeOpen / nativeOpenStage1),
+ * ps2204a_debug_capture_cmds() (a test hook for asserting byte patterns), and
+ * ps2204a_set_siggen_raw() (a pre-encoded frequency word, which
+ * nativeSetSiggenEx covers in engineering units).
+ * ====================================================================== */
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetSiggenEx)(JNIEnv *env, jclass cls, jlong handle,
+                          jint wave_type, jfloat start_hz, jfloat stop_hz,
+                          jfloat increment_hz, jfloat dwell_s,
+                          jint pkpk_uv, jint offset_uv, jint duty_pct)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (duty_pct < 0)   duty_pct = 0;
+    if (duty_pct > 100) duty_pct = 100;
+    return (jint)ps2204a_set_siggen_ex(dev, (ps_wave_t)wave_type,
+                                       (float)start_hz, (float)stop_hz,
+                                       (float)increment_hz, (float)dwell_s,
+                                       (uint32_t)pkpk_uv, (int32_t)offset_uv,
+                                       (uint8_t)duty_pct);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeDisableSiggen)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)env; (void)cls;
+    return (jint)ps2204a_disable_siggen((ps2204a_device_t *)(intptr_t)handle);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeCalibrateDcOffset)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)env; (void)cls;
+    return (jint)ps2204a_calibrate_dc_offset((ps2204a_device_t *)(intptr_t)handle);
+}
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(nativeGetEepromRaw)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    uint8_t raw[256];
+    if (ps2204a_get_eeprom_raw(dev, raw, (int)sizeof(raw)) != PS_OK) return NULL;
+    jbyteArray arr = (*env)->NewByteArray(env, (jsize)sizeof(raw));
+    if (!arr) return NULL;
+    (*env)->SetByteArrayRegion(env, arr, 0, (jsize)sizeof(raw), (const jbyte *)raw);
+    return arr;
+}
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(nativeCaptureRaw)(JNIEnv *env, jclass cls, jlong handle, jint samples)
+{
+    (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (samples <= 0 || samples > 16384) return NULL;
+    /* Dual-channel blocks interleave, so the byte count can reach 2x. */
+    int cap = samples * 2;
+    uint8_t *raw = (uint8_t *)malloc((size_t)cap);
+    if (!raw) return NULL;
+    int got = 0;
+    if (ps2204a_capture_raw(dev, samples, raw, cap, &got) != PS_OK || got <= 0) {
+        free(raw);
+        return NULL;
+    }
+    jbyteArray arr = (*env)->NewByteArray(env, (jsize)got);
+    if (arr) (*env)->SetByteArrayRegion(env, arr, 0, (jsize)got, (const jbyte *)raw);
+    free(raw);
+    return arr;
+}
+
+JNIEXPORT jboolean JNICALL
+JNI_FN(nativeIsStreaming)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    return ps2204a_is_streaming(dev) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeMaxSamples)(JNIEnv *env, jclass cls, jlong handle)
+{
+    (void)env; (void)cls;
+    return (jint)ps2204a_max_samples((ps2204a_device_t *)(intptr_t)handle);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetSdkStreamIntervalNs)(JNIEnv *env, jclass cls, jlong handle,
+                                     jint interval_ns)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (interval_ns < 0) interval_ns = 0;
+    return (jint)ps2204a_set_sdk_stream_interval_ns(dev, (uint32_t)interval_ns);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetSdkStreamAutoStop)(JNIEnv *env, jclass cls, jlong handle,
+                                   jlong max_samples)
+{
+    (void)env; (void)cls;
+    ps2204a_device_t *dev = (ps2204a_device_t *)(intptr_t)handle;
+    if (max_samples < 0) max_samples = 0;
+    return (jint)ps2204a_set_sdk_stream_auto_stop(dev, (uint64_t)max_samples);
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(nativeTimebaseToNs)(JNIEnv *env, jclass cls, jint timebase)
+{
+    (void)env; (void)cls;
+    return (jint)ps2204a_timebase_to_ns((int)timebase);
+}

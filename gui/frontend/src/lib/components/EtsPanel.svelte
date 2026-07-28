@@ -8,6 +8,13 @@
    * one: 1 GS/s in fast mode, 2 GS/s in slow mode. It only works on a signal
    * that repeats and that the trigger can lock onto; a one-shot event will
    * produce noise.
+   *
+   * ETS reconstructs the phase of each block by interpolating the trigger
+   * crossing, and that needs samples either side of it. Below timebase 3 there
+   * are too few: measured on a 200 kHz sine, tb=0 never completes at all,
+   * tb=1 is flaky and loses 60 % of the amplitude, tb=2 loses 30 %. The traces
+   * stay smooth while shrinking, which is what averaging misaligned bins does
+   * — so it fails quietly, hence the warning rather than a silent bad capture.
    */
   let {
     mode        = $bindable('off'),   // off | fast | slow
@@ -16,6 +23,7 @@
     samples     = $bindable(500),
 
     intervalPs = 0,                   // reported by the driver once armed
+    timebase   = 5,                   // current acquisition timebase
     connected  = false,
     busy       = false,
     lastCount  = 0,
@@ -25,6 +33,13 @@
   } = $props();
 
   const effRate = $derived(intervalPs > 0 ? 1e12 / intervalPs : 0);
+
+  // Measured limits, see the comment above.
+  const tbWarning = $derived(
+    timebase <= 0 ? 'Timebase 0 never completes an ETS capture — use 3 or slower.'
+    : timebase === 1 ? 'Timebase 1 is unreliable here and loses about 60 % of the amplitude — use 3 or slower.'
+    : timebase === 2 ? 'Timebase 2 loses about 30 % of the amplitude — use 3 or slower for a faithful trace.'
+    : '');
 
   function fmtRate(hz) {
     if (hz >= 1e9) return (hz / 1e9).toFixed(2) + ' GS/s';
@@ -67,6 +82,10 @@
         <input type="number" bind:value={samples} min="10" max="8192" step="10">
       </div>
 
+      {#if tbWarning}
+        <p class="warn">{tbWarning}</p>
+      {/if}
+
       {#if intervalPs > 0}
         <div class="form-row">
           <label>Effective</label>
@@ -96,4 +115,9 @@
     color: #8899aa; font-size: 11px; margin: 0 0 8px; line-height: 1.45;
   }
   .readout { color: #cfd8e3; font-family: monospace; font-size: 11px; }
+  .warn {
+    color: #ffcc66; background: #3a2f1a; border-left: 3px solid #ffaa33;
+    font-size: 11px; line-height: 1.45; margin: 6px 0; padding: 6px 8px;
+    border-radius: 3px;
+  }
 </style>

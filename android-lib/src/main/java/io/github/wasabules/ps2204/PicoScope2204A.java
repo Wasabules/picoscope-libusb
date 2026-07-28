@@ -360,11 +360,15 @@ public final class PicoScope2204A {
      * floats: {@code [valid, active, offsetMv × 9, gainA × 9, gainB × 9]},
      * ranges ordered 50 mV … 20 V. {@code null} on failure.
      *
-     * <p>The offsets are confirmed against a hand-measured reference (Pearson
-     * r = 0.9989). The gain blocks are not: measuring one signal across four
-     * ranges — which the correct table must render identically — came out worse
-     * with them than with the built-in table, so the driver still applies the
-     * built-in one by default. See {@code docs/protocol.md}.</p>
+     * <p>This table is the default. Scored against the official SDK range by
+     * range — the SDK applies the factory trim, so agreeing with it is the
+     * goal — it lands at 0.88 % mean error against 4.34 % for the built-in
+     * table, whose 50 mV gain is out by 19.6 %. An earlier note here claimed
+     * the opposite, on the strength of a test that asked whether one signal
+     * measured the same across four ranges; that conflates the calibration
+     * with the generator's own accuracy and with 8-bit quantisation. The
+     * stored DC offsets are decoded but deliberately not applied — the device
+     * already compensates that term. See {@code docs/protocol.md}.</p>
      */
     public static native float[] nativeGetEepromCalibration(long handle);
 
@@ -373,4 +377,83 @@ public final class PicoScope2204A {
      * Fails with {@code PS_ERROR_STATE} if the EEPROM did not decode.
      */
     public static native int nativeUseEepromCalibration(long handle, boolean enable);
+
+    /* ====================================================================
+     * Remaining driver surface
+     *
+     * Three public driver functions stay unbound on purpose:
+     * {@code ps2204a_open()} (Android always enters through the
+     * file-descriptor path — see {@link #nativeOpen}), the
+     * {@code debug_capture_cmds} test hook, and {@code set_siggen_raw},
+     * whose pre-encoded frequency word {@link #nativeSetSiggenEx} covers in
+     * engineering units.
+     * ==================================================================== */
+
+    /**
+     * Full signal generator: sweeps, DC offset and duty cycle, none of which
+     * {@link #nativeSetSiggen} can reach.
+     *
+     * <p>Pass {@code startHz == stopHz} with {@code incrementHz = 0} for a
+     * fixed frequency. {@code dutyPct} applies to squares.</p>
+     *
+     * @param offsetUv DC offset in microvolts, may be negative
+     * @param dutyPct  1..99 for a square; ignored by other shapes
+     */
+    public static native int nativeSetSiggenEx(long handle, int waveType,
+                                               float startHz, float stopHz,
+                                               float incrementHz, float dwellS,
+                                               int pkpkUv, int offsetUv,
+                                               int dutyPct);
+
+    /** Silence the generator (flat DAC table). */
+    public static native int nativeDisableSiggen(long handle);
+
+    /**
+     * Measure the DC offset of the enabled channels and store it as their
+     * calibration. Assumes the inputs are shorted or otherwise at 0 V — with
+     * a live signal connected this writes a wrong offset.
+     */
+    public static native int nativeCalibrateDcOffset(long handle);
+
+    /**
+     * The 256 raw EEPROM bytes (four 64-byte pages), for anyone decoding the
+     * factory layout further. {@code null} on failure.
+     */
+    public static native byte[] nativeGetEepromRaw(long handle);
+
+    /**
+     * Diagnostic: the undecoded 8-bit samples of the valid buffer region,
+     * after the header and the circular-buffer start offset. Dual-channel
+     * captures interleave as B, A, B, A anchored on the end of the transfer.
+     * {@code null} on failure.
+     */
+    public static native byte[] nativeCaptureRaw(long handle, int samples);
+
+    /** Whether a streaming thread is currently running. */
+    public static native boolean nativeIsStreaming(long handle);
+
+    /** Largest block the device will return for the current configuration. */
+    public static native int nativeMaxSamples(long handle);
+
+    /**
+     * Requested sample interval for {@code PS_STREAM_SDK}, in nanoseconds.
+     * Call after opening and before starting that mode.
+     */
+    public static native int nativeSetSdkStreamIntervalNs(long handle,
+                                                          int intervalNs);
+
+    /**
+     * Stop {@code PS_STREAM_SDK} automatically after this many samples;
+     * 0 leaves it free-running. Call before starting the mode.
+     */
+    public static native int nativeSetSdkStreamAutoStop(long handle,
+                                                        long maxSamples);
+
+    /**
+     * Nominal sample interval for a timebase index, {@code 10 × 2^tb} ns.
+     * Measured against wall time up to tb = 20. Note this is the formula
+     * value: in fast-streaming mode the hardware delivers a fixed rate
+     * instead, which {@link #nativeGetStreamingDtNs} reports.
+     */
+    public static native int nativeTimebaseToNs(int timebase);
 }
