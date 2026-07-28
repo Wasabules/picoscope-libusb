@@ -88,6 +88,14 @@ static void ps_sleep_us(unsigned long us)
  * negative rail would be extreme clipping (82 us at timebase 5). */
 #define PAD_RUN_MIN     256
 
+/* Block-trigger threshold encoding — see build_capture_cmd2. */
+#define TRIG_COUNTS_PER_LSB 295.0
+#define TRIG_BASE_A         0x7d
+#define TRIG_BASE_B         0x81
+#define TRIG_IDLE_A         0x7c
+#define TRIG_IDLE_B         0x81
+#define TRIG_IDLE_BAND      4
+
 /* Table index for `range`, or -1 if the range is outside the supported set. */
 static inline int range_index(ps_range_t range)
 {
@@ -502,8 +510,10 @@ static void encode_gain_bytes(ps2204a_device_t *dev,
 
     *b50 = 0x20 | (b_en << 1) | a_en;
 
-    int a_dc = (dev->ch[0].coupling == PS_DC) ? 1 : 0;
-    int b_dc = (dev->ch[1].coupling == PS_DC) ? 1 : 0;
+    /* A disabled channel reads as AC in the SDK trace whatever its configured
+     * coupling — the relay is not engaged when the channel is off. */
+    int a_dc = (a_en && dev->ch[0].coupling == PS_DC) ? 1 : 0;
+    int b_dc = (b_en && dev->ch[1].coupling == PS_DC) ? 1 : 0;
 
     uint8_t a_bank, a_sel, a_200;
     uint8_t b_bank, b_sel, b_200;
@@ -606,7 +616,13 @@ static void build_capture_cmd1(ps2204a_device_t *dev, uint8_t *cmd,
     } else if (dev->trigger_mode == PS_TRIGGER_PWQ) {
         status_cfg = 0x05;
     } else {
-        status_cfg = 0x55;
+        /* Channel-dependent, captured from the SDK under LD_PRELOAD with a
+         * trigger armed: 0x55 selects channel A as the source, 0x33 selects
+         * channel B. Sending 0x55 for both — which is what this did — left the
+         * device waiting on a condition it had never been told to watch, so a
+         * capture triggered on B never completed and fell back to the poll
+         * timeout with a free-running buffer. */
+        status_cfg = (dev->trigger_source == PS_CHANNEL_B) ? 0x33 : 0x55;
     }
 
     memset(cmd, 0, CMD_SIZE);
@@ -722,38 +738,57 @@ static void build_capture_cmd2(ps2204a_device_t *dev, uint8_t *cmd)
          *
          *   cmd[21] = 0x09 rising / 0x12 falling (same for both channels).
          */
+        /* Threshold encoding, measured by sweeping ps2000_set_trigger under
+         * LD_PRELOAD and reading the bytes the SDK actually emitted:
+         *
+         *   byte = base + floor(thr_sdk16 / 295)
+         *   base = 0x7d for channel A, 0x81 for channel B
+         *
+         * Seven sweep points from -32000 to +32000 reproduce exactly, floor
+         * included — the negative side is one count further out than rounding
+         * would give. Full scale lands near ±111 counts rather than ±128
+         * because the analog gain is about 1.15.
+         *
+         * The inactive channel gets its own centre with the same directional
+         * layout and a 4-count band instead of the hysteresis:
+         *   rising  -> (idle, idle - 4)
+         *   falling -> (idle + 4, idle)
+         * with idle = 0x7c for A, 0x81 for B.
+         *
+         * The previous values (base 0x7d/0x80, divisor 288, idle 0x7f/0x7d)
+         * were inferred rather than traced. */
         int32_t thr = (int32_t)dev->trigger_thr_sdk;
-        int32_t delta = thr >= 0 ? (thr + 144) / 288 : (thr - 144) / 288;
+        int32_t delta = (int32_t)floor((double)thr / TRIG_COUNTS_PER_LSB);
 
         cmd[7]  = 0x00; cmd[8]  = 0xff;
         cmd[9]  = 0x00; cmd[10] = 0xff;
 
-        if (dev->trigger_source == PS_CHANNEL_B) {
-            uint8_t thr_byte = (uint8_t)((0x80 + delta) & 0xFF);
-            if (dev->trigger_dir == PS_FALLING) {
-                cmd[11] = (uint8_t)((thr_byte + hyst) & 0xFF);
-                cmd[12] = thr_byte;
-                cmd[13] = 0x81; cmd[14] = 0x7d;
-                cmd[21] = 0x12;
-            } else {
-                cmd[11] = thr_byte;
-                cmd[12] = (uint8_t)((thr_byte - hyst) & 0xFF);
-                cmd[13] = 0x7d; cmd[14] = 0x79;
-                cmd[21] = 0x09;
-            }
+        int on_b = (dev->trigger_source == PS_CHANNEL_B);
+        uint8_t thr_byte  = (uint8_t)(((on_b ? TRIG_BASE_B : TRIG_BASE_A) + delta) & 0xFF);
+        uint8_t idle_byte = on_b ? TRIG_IDLE_A : TRIG_IDLE_B;
+
+        uint8_t act_hi, act_lo, idl_hi, idl_lo;
+        if (dev->trigger_dir == PS_FALLING) {
+            act_hi = (uint8_t)((thr_byte + hyst) & 0xFF);
+            act_lo = thr_byte;
+            idl_hi = (uint8_t)((idle_byte + TRIG_IDLE_BAND) & 0xFF);
+            idl_lo = idle_byte;
+            cmd[21] = 0x12;
         } else {
-            uint8_t thr_byte = (uint8_t)((0x7d + delta) & 0xFF);
-            if (dev->trigger_dir == PS_FALLING) {
-                cmd[11] = 0x83; cmd[12] = 0x7f;
-                cmd[13] = (uint8_t)((thr_byte + hyst) & 0xFF);
-                cmd[14] = thr_byte;
-                cmd[21] = 0x12;
-            } else {
-                cmd[11] = 0x7f; cmd[12] = 0x7b;
-                cmd[13] = thr_byte;
-                cmd[14] = (uint8_t)((thr_byte - hyst) & 0xFF);
-                cmd[21] = 0x09;
-            }
+            act_hi = thr_byte;
+            act_lo = (uint8_t)((thr_byte - hyst) & 0xFF);
+            idl_hi = idle_byte;
+            idl_lo = (uint8_t)((idle_byte - TRIG_IDLE_BAND) & 0xFF);
+            cmd[21] = 0x09;
+        }
+
+        /* Slots 11/12 belong to channel B, slots 13/14 to channel A. */
+        if (on_b) {
+            cmd[11] = act_hi; cmd[12] = act_lo;
+            cmd[13] = idl_hi; cmd[14] = idl_lo;
+        } else {
+            cmd[11] = idl_hi; cmd[12] = idl_lo;
+            cmd[13] = act_hi; cmd[14] = act_lo;
         }
     }
 }

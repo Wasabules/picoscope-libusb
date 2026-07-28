@@ -196,9 +196,47 @@ when CH B is disabled, so the driver forces CH B on for `SDK` sessions.
 
 ### Level trigger (edge)
 
-Lives partly in `cmd1` (`85 05 95` status byte toggles `0x55` ↔ `0xff`)
-and partly in a dedicated `cmd2` sub-command `85 0c 86` carrying
-direction, threshold, and hysteresis.
+Lives partly in `cmd1` (`85 05 95` status byte) and partly in a `cmd2`
+sub-command `85 0c 86` carrying direction, threshold and hysteresis.
+
+**The status byte selects the source channel**, it is not a simple
+armed/free-run flag:
+
+| value | meaning |
+|-------|---------|
+| `0xff` | free-run, no trigger |
+| `0x55` | armed, source = channel A |
+| `0x33` | armed, source = channel B |
+| `0x05` | pulse-width qualifier active |
+
+Sending `0x55` while asking for a channel-B trigger leaves the device
+waiting on a condition it was never told to watch: the capture never
+completes and the driver falls back to its poll timeout with a
+free-running buffer. That was the behaviour until 2026-07-28.
+
+**Threshold**, measured by sweeping `ps2000_set_trigger` under
+`LD_PRELOAD` and reading what the SDK emitted:
+
+```
+byte = base + floor(thr_sdk16 / 295)
+base = 0x7d (channel A) | 0x81 (channel B)
+```
+
+Seven points from −32000 to +32000 reproduce exactly, `floor` included —
+the negative side sits one count further out than rounding would give.
+Full scale lands near ±111 counts rather than ±128 because the analog
+gain is about 1.15.
+
+Slots `cmd2[11..12]` belong to channel B and `cmd2[13..14]` to channel A.
+The active pair is `(threshold, threshold − hyst)` rising and
+`(threshold + hyst, threshold)` falling. The inactive channel gets its own
+centre with the same directional layout and a 4-count band:
+
+```
+idle = 0x7c (channel A) | 0x81 (channel B)
+```
+
+`cmd2[21]` = `0x09` rising, `0x12` falling.
 
 `02 07 06` is the data-commit signal sent identically in block and
 streaming.
