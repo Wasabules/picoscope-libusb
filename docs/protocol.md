@@ -309,9 +309,19 @@ trigger jitter, since 31 sits between 30 and 33 and is never right:
 On hardware after the change, ours vs the SDK: 0.90/0.86, 0.51/0.46,
 1.16/1.15 samples. Unknown markers fall back to 31.
 
-The parser anchors on the corrected position. **Single-channel only so far**:
-the dual-channel path counts pairs rather than bytes, so 30/33 has to be
-re-measured with both channels enabled before it can be used there.
+The parser anchors on the corrected position.
+
+**Dual-channel behaves differently, and needs no marker.** The same
+correlation run with both channels enabled — 72 captures over timebases 3/5/7
+and three AWG frequencies, every one aligning at correlation `1.000000` on
+both channels — gives a flat **31 pairs** of overshoot throughout, with the
+marker stuck at `0x57a7`. `0x52a2`, which is 47 % of single-channel blocks,
+appeared **0 times** in 72 dual blocks. Dual capture has one state where
+single has two, so the fixed constant is the measured answer there rather
+than a fallback. (Plausible reading, not established: the marker selects an
+interleaved sampling phase that only exists when one channel gets the full
+rate.) That run also reconfirms the interleave — channel B on even byte
+indices, A on odd, in all 72 blocks.
 
 Measure this with a square wave, not a sine: a slow sine costs the crossing
 detector part of an edge to arm, which shows up as tens of samples of

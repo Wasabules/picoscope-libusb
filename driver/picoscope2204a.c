@@ -1746,11 +1746,19 @@ static int parse_waveform_dual(const uint8_t *raw, int raw_len, int n_samples,
          * TRIG_PIPELINE_SAMPLES earlier than the requested post-trigger count,
          * and delay_pct decides how much of the window precedes it.
          *
-         * Deliberately still the fixed constant, unlike parse_waveform_ex.
-         * The marker-derived overshoot was measured on single-channel blocks,
-         * where it counts bytes; here the unit is pairs, so 30/33 would have
-         * to be re-measured with both channels enabled before it could be
-         * used. Until then the fallback value is the honest choice. */
+         * Deliberately still the fixed constant, unlike parse_waveform_ex,
+         * and that is the measured answer rather than a fallback.
+         *
+         * Re-ran the get_values correlation with both channels enabled: 72
+         * captures over timebases 3/5/7 and three AWG frequencies, every one
+         * aligning at correlation 1.000000 on both channels. The overshoot is
+         * a flat 31 pairs throughout, and the marker never leaves 0x57a7 --
+         * 0x52a2, which is 47 % of single-channel blocks, appeared 0 times.
+         * Dual capture evidently has one state where single has two, so there
+         * is nothing here for the marker to select between.
+         *
+         * The same run reconfirms the interleave: channel B sits on even byte
+         * indices, A on odd, in all 72 blocks. */
         int dp = delay_pct;
         if (dp < -100) dp = -100;
         if (dp >  100) dp =  100;
