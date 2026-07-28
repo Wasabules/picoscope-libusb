@@ -21,6 +21,7 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <pthread.h>
 #include <errno.h>
 #include <libusb-1.0/libusb.h>
 #include <stdarg.h>
@@ -281,6 +282,81 @@ static void finish(void) {
 /* Intercepted entry points                                            */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Async IN logging                                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * An IN transfer carries nothing at submit time — the payload only exists
+ * once it completes. Logging it therefore means wrapping the application's
+ * callback: record the buffer, then hand control straight to the real one.
+ *
+ * The table is keyed by transfer pointer because libusb drivers reuse a small
+ * pool of transfers and resubmit them; the wrapper has to survive that, so it
+ * is installed once and left in place.
+ *
+ * Know the limit before trusting this: against libps2000 it captured 150
+ * outbound packets and 2 inbound across a run that read 24 blocks of 16 KB.
+ * Whatever path the SDK uses for the bulk of its traffic does not come through
+ * these symbols, so an empty inbound log here is not evidence of an empty bus.
+ * For anything where completeness matters, capture at the kernel instead:
+ *
+ *   sudo modprobe usbmon
+ *   sudo tcpdump -i usbmon<bus> -w cap.pcap -s 0
+ *   tshark -r cap.pcap -Y 'usb.device_address==<n>' -T fields -e usb.capdata
+ *
+ * usbmon sees every transfer regardless of how the library links or resolves
+ * libusb. This interceptor stays useful for firmware extraction, where it runs
+ * early and the uploads do go through libusb_bulk_transfer.
+ */
+#define MAX_TRACKED 64
+static struct {
+    struct libusb_transfer *t;
+    libusb_transfer_cb_fn   cb;
+} tracked[MAX_TRACKED];
+static pthread_mutex_t tracked_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static libusb_transfer_cb_fn find_original_cb(struct libusb_transfer *t) {
+    libusb_transfer_cb_fn cb = NULL;
+    pthread_mutex_lock(&tracked_lock);
+    for (int i = 0; i < MAX_TRACKED; i++) {
+        if (tracked[i].t == t) { cb = tracked[i].cb; break; }
+    }
+    pthread_mutex_unlock(&tracked_lock);
+    return cb;
+}
+
+static void LIBUSB_CALL logging_in_cb(struct libusb_transfer *t) {
+    if (logfile && t->actual_length > 0) {
+        fprintf(logfile, "\n[%04d] t=%lld ASYNC IN   EP 0x%02x "
+                "(actual=%d, status=%d)\n", packet_count, now_us(),
+                t->endpoint, t->actual_length, t->status);
+        /* Waveform payloads run to 16 KB and would drown the log; the head is
+         * where any framing or trigger metadata would sit. */
+        int n = t->actual_length > 64 ? 64 : t->actual_length;
+        hex_dump(logfile, "  RX", t->buffer, n);
+        fflush(logfile);
+    }
+    packet_count++;
+    libusb_transfer_cb_fn orig = find_original_cb(t);
+    if (orig) orig(t);
+}
+
+static void install_in_logger(struct libusb_transfer *t) {
+    if (!t || t->callback == logging_in_cb) return;
+    pthread_mutex_lock(&tracked_lock);
+    int free_slot = -1;
+    for (int i = 0; i < MAX_TRACKED; i++) {
+        if (tracked[i].t == t) { pthread_mutex_unlock(&tracked_lock); return; }
+        if (!tracked[i].t && free_slot < 0) free_slot = i;
+    }
+    if (free_slot >= 0) {
+        tracked[free_slot].t  = t;
+        tracked[free_slot].cb = t->callback;
+        t->callback = logging_in_cb;
+    }
+    pthread_mutex_unlock(&tracked_lock);
+}
+
 int libusb_submit_transfer(struct libusb_transfer *transfer) {
     if (!real_submit) resolve_symbols();
     if (!real_submit) return LIBUSB_ERROR_OTHER;
@@ -288,6 +364,8 @@ int libusb_submit_transfer(struct libusb_transfer *transfer) {
     unsigned char ep  = transfer->endpoint;
     int           len = transfer->length;
     bool          is_in = (ep & 0x80) != 0;
+
+    if (is_in) install_in_logger(transfer);
 
     if (!is_in && transfer->buffer && len > 0) {
         if (transfer->type == LIBUSB_TRANSFER_TYPE_CONTROL) {
