@@ -472,22 +472,48 @@ Reconstructing the hand-measured table from the EEPROM alone lands within
 1.1 % on average and 0.1 % on several ranges — inside the noise of the
 original measurements.
 
-**Gains — not confirmed.** Three Q14 blocks of the right shape exist and
-their magnitude matches the measured gains (~1.11–1.15), but which belongs
-to which channel is still a guess, and the evidence argues against the
-current one: measuring a single AWG signal across four ranges, which the
-correct table must render identically, gave **2.61 %** spread using the
-EEPROM gains against **1.44 %** using the built-in table. Settling this
-needs a voltage reference.
+**Gains — confirmed, and the block assignment was right.**
 
-Accordingly `ps2204a_get_eeprom_calibration()` exposes the decoded table
-and `ps2204a_use_eeprom_calibration()` opts into it, but the driver still
-applies the built-in reference table by default.
+This section previously said the opposite. The test behind that was to ask
+whether one AWG signal measured the same across four ranges, which gave
+2.61 % spread with the EEPROM gains against 1.44 % with the built-in ones.
+That test conflates the calibration with the AWG's own accuracy and with the
+8-bit quantisation floor — a fixed 250 mV signal is 1.6 counts on the 20 V
+range — and it pointed the wrong way.
 
-Note also that the built-in 50 mV gain (1.4722) is a ~30 % outlier against
-every other range (~1.11–1.19) and against all three EEPROM blocks (~1.12).
-It was measured against a 28 mV reference — the smallest reference on the
-smallest range — and is the most likely candidate for a bad measurement.
+The clean test compares against the SDK range by range. The SDK applies the
+factory calibration, so agreeing with it *is* the goal, and choosing one AWG
+amplitude per range (≈60 % of full scale) keeps every point well clear of
+quantisation. Nine ranges, three passes each:
+
+| range | SDK | built-in | EEPROM |
+|-------|-----|----------|--------|
+| 50 mV | 28.41 mV | 33.97 (**+19.6 %**) | 29.23 (+2.9 %) |
+| 100 mV | 59.06 | 61.05 (+3.4 %) | 59.89 (+1.4 %) |
+| 200 mV | 119.42 | 122.12 (+2.3 %) | 120.22 (+0.7 %) |
+| 500 mV | 300.32 | 302.25 (+0.6 %) | 301.60 (+0.4 %) |
+| 1 V | 603.75 | 604.71 (+0.2 %) | 600.33 (−0.6 %) |
+| 2 V | 1210.49 | 1186.41 (−2.0 %) | 1213.24 (+0.2 %) |
+| 5 V | 2024.57 | 1937.10 (−4.3 %) | 2022.62 (−0.1 %) |
+| 10 V | 2021.35 | 1975.01 (−2.3 %) | 1993.64 (−1.4 %) |
+| 20 V | 2008.99 | 2098.56 (+4.5 %) | 2014.48 (+0.3 %) |
+
+| table | mean abs. error | RMS | worst |
+|-------|-----------------|-----|-------|
+| built-in | 4.34 % | 7.05 % | +19.57 % |
+| EEPROM | **0.88 %** | **1.22 %** | +2.90 % |
+
+The EEPROM table is five times more accurate. It is now the default, with
+the built-in table as the fallback when the EEPROM does not read or does not
+parse; `ps2204a_use_eeprom_calibration(dev, false)` selects the built-in one.
+This also brings the code in line with the header, which had documented
+EEPROM-by-default all along.
+
+The +19.6 % at 50 mV vindicates a long-standing suspicion recorded here: the
+built-in 50 mV gain (1.4722) is a ~30 % outlier against every other range
+(~1.11–1.19) and against all three EEPROM blocks (~1.12). It was measured
+against a 28 mV reference — the smallest reference on the smallest range —
+and it was indeed a bad measurement.
 
 ## USB tracing tips
 

@@ -2953,21 +2953,38 @@ static ps_status_t do_open_post_reenum(ps2204a_device_t *dev)
         dev->builtin_cal.gain[1][r] = FACTORY_GAIN[r];
     }
 
-    /* The EEPROM table is decoded and exposed, but NOT applied by default.
+    /* The factory EEPROM table is the default, and the built-in one is the
+     * fallback for a unit whose EEPROM does not read or does not parse.
      *
-     * Its offsets are solid: reconstructing the hand-measured reference table
-     * from the stored words alone lands within 1.1 % on average. The gain
-     * blocks are not. Measuring one AWG signal across four ranges — which the
-     * correct table must render identically — gave 2.61 % spread with the
-     * EEPROM gains against 1.44 % with the built-in ones, so the block
-     * assignment is still a guess. Switching the default on that evidence
-     * would be trading a known table for an unverified one.
+     * It used to be the other way round, because the gain-block assignment
+     * had only been checked by asking whether one AWG signal measured the
+     * same across four ranges. That test conflates the calibration with the
+     * AWG's own accuracy, and it pointed the wrong way.
      *
-     * ps2204a_use_eeprom_calibration(dev, true) opts in; confirming the gain
-     * blocks needs a voltage reference. */
+     * The clean test is to compare against the SDK range by range: it applies
+     * the factory calibration, so matching it is the goal, and using one
+     * amplitude per range keeps every point clear of the 8-bit quantisation
+     * floor. Nine ranges, three passes each, error against the SDK:
+     *
+     *   table       mean |error|   RMS     worst
+     *   built-in       4.34 %      7.05 %  +19.57 %  (at 50 mV)
+     *   EEPROM         0.88 %      1.22 %   +2.90 %
+     *
+     * Per range the built-in table is out by +19.6 / +3.4 / +2.3 % at
+     * 50/100/200 mV and -4.3 % at 5 V, while the EEPROM one stays inside
+     * 3 % everywhere and inside 1 % over most of the span. The block
+     * assignment was right.
+     *
+     * ps2204a_use_eeprom_calibration(dev, false) selects the built-in table
+     * for callers who want the old behaviour. */
     parse_eeprom_cal(dev);
-    apply_cal_table(dev, &dev->builtin_cal);
-    dev->using_eeprom_cal = false;
+    if (dev->eeprom_cal.valid) {
+        apply_cal_table(dev, &dev->eeprom_cal);
+        dev->using_eeprom_cal = true;
+    } else {
+        apply_cal_table(dev, &dev->builtin_cal);
+        dev->using_eeprom_cal = false;
+    }
     printf("  Calibration: built-in reference table%s\n",
            dev->eeprom_cal.valid
            ? " (per-unit EEPROM table decoded, available on request)" : "");
